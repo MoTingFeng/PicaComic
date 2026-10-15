@@ -13,6 +13,9 @@ on:
       - 'pubspec.lock'
       - '.github/workflows/android.yml'
 
+permissions:
+  contents: write
+
 jobs:
   build_android:
     runs-on: ubuntu-24.04
@@ -67,7 +70,7 @@ jobs:
       - name: Build release APK
         run: flutter build apk --release
 
-      - name: Upload APKs
+      - name: Upload APKs as artifact
         uses: actions/upload-artifact@v4
         with:
           name: PicaComic-APK
@@ -75,3 +78,22 @@ jobs:
           path: |
             build/app/outputs/flutter-apk/*.apk
             build/app/outputs/apk/release/*.apk
+
+      - name: Publish APKs to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG=apk-build
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists, replacing assets"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "PicaComic APK (auto build)" \
+              --notes "Built by GitHub Actions. Source commit: ${GITHUB_SHA:0:7}"
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            build/app/outputs/flutter-apk/*.apk
+          echo "--- release assets ---"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | "\(.name) | \((.size/1048576*100|round)/100) MB"'
