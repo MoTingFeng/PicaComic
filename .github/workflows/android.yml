@@ -92,9 +92,13 @@ jobs:
             echo "release $TAG already exists, replacing assets"
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "PicaComic APK (auto build)" \
-              --notes "Built by GitHub Actions. Source commit: ${GITHUB_SHA:0:7}"
+              --title "PicaComic Mod 4.2.11-mod" \
+              --notes "Built by GitHub Actions."
           fi
+          # 每次构建都刷新标题与说明, 让版本号在 releases 列表页可见
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "PicaComic Mod 4.2.11-mod" \
+            --notes "自动构建 build ${{ github.run_number }} / 源码 ${{ github.sha }}"
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             build/app/outputs/flutter-apk/*.apk
           echo "--- release assets ---"
