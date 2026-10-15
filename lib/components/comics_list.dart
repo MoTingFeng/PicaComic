@@ -23,6 +23,43 @@ class ComicsPageLogic<T> extends StateController {
 
   bool showFloatingButton = true;
 
+  /// 是否处于多选模式
+  bool selecting = false;
+
+  /// 多选模式下已选中的漫画 id
+  final Set<String> selectedIds = {};
+
+  void enterSelectionMode() {
+    selecting = true;
+    selectedIds.clear();
+    update();
+  }
+
+  void exitSelectionMode() {
+    selecting = false;
+    selectedIds.clear();
+    update();
+  }
+
+  void toggleSelect(String id) {
+    if (!selectedIds.remove(id)) {
+      selectedIds.add(id);
+    }
+    update();
+  }
+
+  void selectAll(Iterable<String> ids) {
+    selectedIds
+      ..clear()
+      ..addAll(ids);
+    update();
+  }
+
+  void clearSelection() {
+    selectedIds.clear();
+    update();
+  }
+
   void get(Future<Res<List<T>>> Function(int) getComics) async {
     if (loadingData) return;
     loadingData = true;
@@ -224,7 +261,7 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
                   ],
                 );
               }
-              return SmoothCustomScrollView(
+              var content = SmoothCustomScrollView(
                 slivers: [
                   if (title != null)
                     SliverAppbar(
@@ -255,6 +292,7 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
                     )
                 ],
               );
+              return buildSelectableBody(context, logic, comics, content);
             } else {
               List<T> comics = [];
               if (appdata.appSettings.fullyHideBlockedWorks) {
@@ -332,6 +370,8 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
                 },
                 child: body,
               );
+
+              body = buildSelectableBody(context, logic, comics, body);
 
               if (showPageIndicator && appdata.settings[64] == "1") {
                 return Stack(
@@ -578,7 +618,111 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
   }
 
   Widget buildItem(BuildContext context, T item) {
-    return buildComicTile(context, item, sourceKey, addonMenuOptions: addonMenuOptions);
+    var tile = buildComicTile(context, item, sourceKey,
+        addonMenuOptions: addonMenuOptions);
+    var logic = StateController.findOrNull<ComicsPageLogic<T>>(tag: tag);
+    if (logic == null || !logic.selecting) {
+      return tile;
+    }
+    var selected = logic.selectedIds.contains(item.id);
+    var primary = Theme.of(context).colorScheme.primary;
+    return GestureDetector(
+      onTap: () => logic.toggleSelect(item.id),
+      child: Stack(
+        children: [
+          IgnorePointer(child: tile),
+          Positioned.fill(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              decoration: BoxDecoration(
+                color: selected ? primary.withOpacity(0.3) : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+                border: selected ? Border.all(color: primary, width: 2) : null,
+              ),
+              child: selected
+                  ? Align(
+                      alignment: Alignment.topRight,
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: Icon(Icons.check_circle, color: primary),
+                      ),
+                    )
+                  : null,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 多选模式下的顶部操作栏
+  Widget buildSelectionBar(
+      BuildContext context, ComicsPageLogic logic, List<T> comics) {
+    var allSelected =
+        comics.isNotEmpty && logic.selectedIds.length >= comics.length;
+    return Material(
+      color: Theme.of(context).colorScheme.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+        child: Row(
+          children: [
+            Text("@a 已选".tlParams({"a": "${logic.selectedIds.length}"})),
+            const Spacer(),
+            TextButton(
+              onPressed: () {
+                if (allSelected) {
+                  logic.clearSelection();
+                } else {
+                  logic.selectAll(comics.map((e) => e.id));
+                }
+              },
+              child: Text(allSelected ? "取消全选".tl : "全选".tl),
+            ),
+            const SizedBox(
+              width: 4,
+            ),
+            FilledButton(
+              onPressed: () {
+                var requests = <({String key, String target, String title})>[];
+                for (var comic in comics) {
+                  if (logic.selectedIds.contains(comic.id)) {
+                    requests.add(
+                        (key: sourceKey, target: comic.id, title: comic.title));
+                  }
+                }
+                if (requests.isEmpty) {
+                  showToast(message: "请先选择漫画".tl);
+                  return;
+                }
+                downloadComicsDirectly(requests);
+              },
+              child: Text("下载".tl),
+            ),
+            const SizedBox(
+              width: 4,
+            ),
+            TextButton(
+              onPressed: () => logic.exitSelectionMode(),
+              child: Text("取消".tl),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 多选模式下在列表上方插入操作栏
+  Widget buildSelectableBody(BuildContext context, ComicsPageLogic logic,
+      List<T> comics, Widget child) {
+    if (!logic.selecting) {
+      return child;
+    }
+    return Column(
+      children: [
+        buildSelectionBar(context, logic, comics),
+        Expanded(child: child),
+      ],
+    );
   }
 }
 

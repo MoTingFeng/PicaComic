@@ -140,5 +140,8 @@ class _HiComicTile extends ComicTile {
   String get comicID => comic.link;
 
   @override
+  String? get sourceKey => 'hitomi';
+
+  @override
   final List<ComicTileMenuOption>? addonMenuOptions;
 }

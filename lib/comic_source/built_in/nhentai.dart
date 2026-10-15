@@ -242,5 +242,8 @@ class _NhentaiComicTile extends ComicTile {
   String get comicID => comic.id;
 
   @override
+  String? get sourceKey => 'nhentai';
+
+  @override
   final List<ComicTileMenuOption>? addonMenuOptions;
 }

@@ -326,5 +326,8 @@ class _JmComicTile extends ComicTile {
   String get comicID => comic.id;
 
   @override
+  String? get sourceKey => 'jm';
+
+  @override
   final List<ComicTileMenuOption>? addonMenuOptions;
 }

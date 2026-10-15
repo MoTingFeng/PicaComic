@@ -41,6 +41,9 @@ abstract class ComicTile extends StatelessWidget {
   /// Comic ID, used to identify a comic.
   String? get comicID => null;
 
+  /// 该列表项所属的漫画源 key; 为 null 时列表长按不提供直接下载与多选.
+  String? get sourceKey => null;
+
   bool get showFavorite => true;
 
   void showBlockPane() {
@@ -99,6 +102,34 @@ abstract class ComicTile extends StatelessWidget {
                         onTap: () {
                           context.pop();
                           read!();
+                        },
+                      ),
+                    if (sourceKey != null && comicID != null)
+                      ListTile(
+                        leading: const Icon(Icons.download),
+                        title: Text("下载".tl),
+                        onTap: () {
+                          context.pop();
+                          downloadComicDirectly(
+                            sourceKey: sourceKey!,
+                            target: comicID!,
+                            title: title,
+                          );
+                        },
+                      ),
+                    if (sourceKey != null)
+                      ListTile(
+                        leading: const Icon(Icons.checklist),
+                        title: Text("多选".tl),
+                        onTap: () {
+                          context.pop();
+                          var logic =
+                              StateController.findOrNull<ComicsPageLogic>();
+                          if (logic == null) {
+                            showToast(message: "当前页面不支持多选".tl);
+                          } else {
+                            logic.enterSelectionMode();
+                          }
                         },
                       ),
                     ListTile(
@@ -807,6 +838,9 @@ class CustomComicTile extends ComicTile {
 
   @override
   String? get comicID => comic.id;
+
+  @override
+  String? get sourceKey => comic.sourceKey;
 
   @override
   get read => () async {

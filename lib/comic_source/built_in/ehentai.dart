@@ -390,6 +390,9 @@ class _EhGalleryTile extends ComicTile {
 
   @override
   String get comicID => gallery.link;
+
+  @override
+  String? get sourceKey => 'ehentai';
 }
 
 class _SearchOptions extends StatefulWidget {
