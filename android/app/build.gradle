@@ -55,7 +55,7 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.github.pacalini.pica_comic"
+        applicationId "com.github.motingfeng.pica_comic"
         // You can update the following values to match your application needs.
         // For more information, see: https://docs.flutter.dev/deployment/android#reviewing-the-gradle-build-configuration.
         minSdkVersion flutter.minSdkVersion
