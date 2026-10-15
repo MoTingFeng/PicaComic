@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 20
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -88,19 +90,54 @@ jobs:
         run: |
           set -e
           TAG=apk-build
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $TAG already exists, replacing assets"
-          else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "PicaComic Mod 4.2.11-mod" \
-              --notes "Built by GitHub Actions."
-          fi
-          # 每次构建都刷新标题与说明, 让版本号在 releases 列表页可见
+          BUILD_NO="${GITHUB_RUN_NUMBER}"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+
+          # tag 跟随本次构建的源码, 这样 release 页面上的 commit 才是对的
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$TAG"
+
+          # 生成更新说明
+          NOTES=release_notes.md
+          {
+            echo "## PicaComic Mod · 4.2.11-mod"
+            echo ""
+            echo "构建 **#${BUILD_NO}** ｜ 源码 \`${SHORT_SHA}\` ｜ $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            echo "### 本版包含的提交"
+            echo ""
+            git log -10 --pretty=format:'- %s (\`%h\`)'
+            echo ""
+            echo ""
+            echo "### 与原版的差异"
+            echo ""
+            echo "- 应用名 **Pica Comic Mod**，包名 \`com.github.mo.pica_comic\` — 可与官方版**并存安装**"
+            echo "- 漫画列表**长按封面** → 菜单新增「下载」「多选」"
+            echo "- 单本下载: 禁漫/哔咔/自定义源弹章节选择框(已下载章节自动跳过)；hitomi/nhentai/E站/绅士漫画弹确认框后整本下载"
+            echo "- 多选批量: 一次入队多本, 只补下缺失章节"
+            echo "- 已合并上游待处理的一批修复: 中文宋体渲染、CF 验证死循环、E站归档页码顺序、下载页白屏崩溃、重复下载任务等"
+            echo ""
+            echo "### 安装说明"
+            echo ""
+            echo "- 手机建议下载 **app-arm64-v8a-release.apk**（约 30 MB）"
+            echo "- **覆盖安装即可，无需卸载**，收藏/下载/阅读进度均保留"
+            echo "- 签名固定，可直接升级"
+            echo "- 若首次安装后无法联网: 到代理软件里重启一次(或重开 VPN)让它重新认一次新应用即可"
+          } > "$NOTES"
+
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --title "PicaComic Mod" --notes "pending"
+
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "PicaComic Mod 4.2.11-mod" \
-            --notes "自动构建 build ${{ github.run_number }} / 源码 ${{ github.sha }}"
+            --title "PicaComic Mod 4.2.11-mod (build ${BUILD_NO})" \
+            --notes-file "$NOTES"
+
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             build/app/outputs/flutter-apk/*.apk
+
           echo "--- release assets ---"
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | "\(.name) | \((.size/1048576*100|round)/100) MB"'
