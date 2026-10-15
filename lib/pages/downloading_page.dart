@@ -196,10 +196,11 @@ class _DownloadingTileState extends State<_DownloadingTile> {
   }
 
   void updateStatistic() {
-    if(comic != DownloadManager().downloading.first) {
+    final firstItem = DownloadManager().downloading.firstOrNull;
+    if (firstItem == null || comic != firstItem) {
       return;
     }
-    comic = DownloadManager().downloading.first;
+    comic = firstItem;
     speed = comic.currentSpeed;
     downloadPages = comic.downloadedPages;
     pagesCount = comic.totalPages;

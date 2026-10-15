@@ -455,84 +455,62 @@ DownloadingItem downloadingItemFromMap(
 }
 
 extension AddDownloadExt on DownloadManager {
-  ///添加哔咔漫画下载
-  void addPicDownload(ComicItem comic, List<int> downloadEps) {
-    downloading.addLast(PicDownloadingItem(
-        comic, downloadEps, _onFinish, _onError, _saveInfo, comic.id));
+  /// 统一入队: 同一漫画(同 id)不重复添加, 防止重复下载与下载页出现重复任务
+  void _enqueueDownload(DownloadingItem item) {
+    if (downloading.any((e) => e.id == item.id)) {
+      return;
+    }
+    downloading.addLast(item);
     _saveInfo();
     if (!isDownloading) {
       downloading.first.start();
       isDownloading = true;
     }
+  }
+
+  ///添加哔咔漫画下载
+  void addPicDownload(ComicItem comic, List<int> downloadEps) {
+    _enqueueDownload(PicDownloadingItem(
+        comic, downloadEps, _onFinish, _onError, _saveInfo, comic.id));
   }
 
   ///添加E-Hentai下载
   void addEhDownload(Gallery gallery, [int type = 0]) {
     final id = getGalleryId(gallery.link);
-    downloading.addLast(
+    _enqueueDownload(
         EhDownloadingItem(gallery, _onFinish, _onError, _saveInfo, id, type));
-    _saveInfo();
-    if (!isDownloading) {
-      downloading.first.start();
-      isDownloading = true;
-    }
   }
 
   ///添加禁漫下载
   void addJmDownload(JmComicInfo comic, List<int> downloadEps) {
-    downloading.addLast(JmDownloadingItem(
+    _enqueueDownload(JmDownloadingItem(
         comic, downloadEps, _onFinish, _onError, _saveInfo, "jm${comic.id}"));
-    _saveInfo();
-    if (!isDownloading) {
-      downloading.first.start();
-      isDownloading = true;
-    }
   }
 
   ///添加Hitomi下载
   void addHitomiDownload(HitomiComic comic, String cover, String link) {
     final id = "hitomi${comic.id}";
-    downloading.addLast(HitomiDownloadingItem(
+    _enqueueDownload(HitomiDownloadingItem(
         comic, cover, link, _onFinish, _onError, _saveInfo, id));
-    _saveInfo();
-    if (!isDownloading) {
-      downloading.first.start();
-      isDownloading = true;
-    }
   }
 
   ///添加绅士漫画下载
   void addHtDownload(HtComicInfo comic) {
     final id = "Ht${comic.id}";
-    downloading
-        .addLast(DownloadingHtComic(comic, _onFinish, _onError, _saveInfo, id));
-    _saveInfo();
-    if (!isDownloading) {
-      downloading.first.start();
-      isDownloading = true;
-    }
+    _enqueueDownload(
+        DownloadingHtComic(comic, _onFinish, _onError, _saveInfo, id));
   }
 
   void addNhentaiDownload(NhentaiComic comic) {
     final id = "nhentai${comic.id}";
-    downloading.addLast(
+    _enqueueDownload(
         NhentaiDownloadingItem(comic, _onFinish, _onError, _saveInfo, id));
-    _saveInfo();
-    if (!isDownloading) {
-      downloading.first.start();
-      isDownloading = true;
-    }
   }
 
   void addCustomDownload(ComicInfoData comic, List<int> downloadEps) {
     var id = generateId(comic.sourceKey, comic.comicId);
-    downloading.addLast(CustomDownloadingItem(
+    _enqueueDownload(CustomDownloadingItem(
         comic, downloadEps, _onFinish, _onError, _saveInfo, id));
-    _saveInfo();
-    if (!isDownloading) {
-      downloading.first.start();
-      isDownloading = true;
-    }
   }
 
   void addFavoriteDownload(FavoriteItem comic) {
@@ -545,13 +523,8 @@ extension AddDownloadExt on DownloadManager {
       6 => "nhentai${comic.target}",
       _ => generateId(comic.type.comicSource.key, comic.target)
     };
-    downloading.addLast(
+    _enqueueDownload(
         FavoriteDownloading(comic, _onFinish, _onError, _saveInfo, id));
-    _saveInfo();
-    if (!isDownloading) {
-      downloading.first.start();
-      isDownloading = true;
-    }
   }
 }
 
@@ -659,16 +632,50 @@ abstract mixin class _DownloadDb {
       select * from download
       order by $order $direction
     ''');
-    return result
-        .map(
-          (e) => _getComicFromJson(
-            e['id'],
-            e['json'],
-            DateTime.fromMillisecondsSinceEpoch(e['time']),
-            e['directory']
-          )!,
-        )
-        .toList();
+    var list = <DownloadedItem>[];
+    for (var row in result) {
+      // 单条记录损坏不能让整个下载页白屏:
+      // 解析失败就丢弃该条, 并清理它残留的磁盘目录与数据库条目
+      var id = row['id'];
+      try {
+        var item = _getComicFromJson(
+          id as String,
+          row['json'] as String,
+          DateTime.fromMillisecondsSinceEpoch(row['time'] as int),
+          row['directory'] is String ? row['directory'] as String : null,
+        );
+        if (item != null) {
+          list.add(item);
+        } else {
+          _discardBrokenDownload(id, row['directory']);
+        }
+      } catch (e) {
+        if (id is String) {
+          _discardBrokenDownload(id, null);
+        }
+      }
+    }
+    return list;
+  }
+
+  /// 丢弃一条无法解析的下载记录: 先删磁盘目录, 再删数据库条目
+  void _discardBrokenDownload(String id, dynamic directory) {
+    if (directory is String && directory.isNotEmpty) {
+      try {
+        var dir = Directory("${DownloadManager().path}/$directory");
+        if (dir.existsSync()) {
+          dir.deleteSync(recursive: true);
+        }
+      } catch (_) {
+        // 目录已不存在或无法删除, 忽略
+      }
+    }
+    try {
+      _deleteFromDb(id);
+    } catch (e) {
+      LogManager.addLog(
+          LogLevel.error, "IO", "Failed to remove broken download record: $e");
+    }
   }
 
   static final _cache = <String, String>{};

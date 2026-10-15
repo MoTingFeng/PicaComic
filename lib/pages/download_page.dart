@@ -566,7 +566,16 @@ class DownloadPage extends StatelessWidget {
                               }
                             }
                             await downloadManager.delete(comics);
-                            logic.refresh();
+                            // 从列表本地移除已删除项, 而不是整页 refresh,
+                            // 避免刷新导致滚动位置复位
+                            logic.comics
+                                .removeWhere((c) => comics.contains(c.id));
+                            logic.baseComics
+                                .removeWhere((c) => comics.contains(c.id));
+                            logic.searchMode = false;
+                            logic.selecting = false;
+                            logic.resetSelected(logic.comics.length);
+                            logic.update();
                           },
                           child: Text("确认".tl)),
                     ],

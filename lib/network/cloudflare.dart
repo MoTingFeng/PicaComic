@@ -118,22 +118,25 @@ void passCloudflare(CloudflareException e, void Function() onFinished) async {
     var webview = DesktopWebview(
       initialUrl: url,
       onTitleChange: (title, controller) async {
-        var res = await controller.evaluateJavascript(
-            "document.head.innerHTML.includes('#challenge-success-text')");
-        if (res == 'false') {
-          var ua = controller.userAgent;
-          if (ua != null) {
-            appdata.implicitData[3] = ua;
-            appdata.writeImplicitData();
-          }
-          var cookiesMap = await controller.getCookies(url);
-          if(cookiesMap['cf_clearance'] == null) {
-            return;
-          }
-          saveCookies(cookiesMap);
-          controller.close();
-          onFinished();
+        // 先确认已拿到 cf_clearance, 再用 _cf_chl_opt 判断挑战页是否仍在,
+        // 避免挑战未通过时反复触发造成的死循环
+        var cookiesMap = await controller.getCookies(url);
+        if (cookiesMap['cf_clearance'] == null) {
+          return;
         }
+        var isChallenge = await controller.evaluateJavascript(
+            "typeof _cf_chl_opt !== 'undefined'");
+        if (isChallenge == 'true') {
+          return;
+        }
+        var ua = controller.userAgent;
+        if (ua != null) {
+          appdata.implicitData[3] = ua;
+          appdata.writeImplicitData();
+        }
+        saveCookies(cookiesMap);
+        controller.close();
+        onFinished();
       },
     );
     webview.open();
@@ -143,22 +146,22 @@ void passCloudflare(CloudflareException e, void Function() onFinished) async {
         initialUrl: url,
         singlePage: true,
         onTitleChange: (title, controller) async {
-          var res = await controller.platform.evaluateJavascript(
-              source:
-                  "document.head.innerHTML.includes('#challenge-success-text')");
-          if (res == false) {
-            var ua = await controller.getUA();
-            if (ua != null) {
-              appdata.implicitData[3] = ua;
-              appdata.writeImplicitData();
-            }
-            var cookiesMap = await controller.getCookies(url) ?? {};
-            if(cookiesMap['cf_clearance'] == null) {
-              return;
-            }
-            saveCookies(cookiesMap);
-            App.globalBack();
+          var cookiesMap = await controller.getCookies(url) ?? {};
+          if (cookiesMap['cf_clearance'] == null) {
+            return;
           }
+          var isChallenge = await controller.platform.evaluateJavascript(
+              source: "typeof _cf_chl_opt !== 'undefined'");
+          if (isChallenge == true) {
+            return;
+          }
+          var ua = await controller.getUA();
+          if (ua != null) {
+            appdata.implicitData[3] = ua;
+            appdata.writeImplicitData();
+          }
+          saveCookies(cookiesMap);
+          App.globalBack();
         },
         onStarted: (controller) async {
           var ua = await controller.getUA();

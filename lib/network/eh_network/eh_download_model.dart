@@ -216,8 +216,13 @@ class EhDownloadingItem extends DownloadingItem{
     }
   }
 
-  void finish() async{
-    onFinish?.call();
+  void finish() async {
+    try {
+      onFinish?.call();
+    } catch (e, s) {
+      log("Download finish error: $e\n$s", "Download", LogLevel.error);
+      onError?.call();
+    }
   }
 
   @override
@@ -342,22 +347,45 @@ class _IsolateDownloader{
           sendPort.send(status);
         }
         ZipFile.openAndExtract("$savePath/temp.zip", savePath);
-        var files = Directory(savePath).listSync();
-        files.sort((a, b) => a.path.compareTo(b.path));
-        int index = 0;
-        for(var entry in Directory(savePath).listSync()){
-          if(entry is File){
-            var name = entry.path.split(pathSep).last;
-            if(name.endsWith(".zip")){
-              entry.deleteSync();
-            } else if(!name.contains("cover")){
-              var baseName = index.toString();
-              index++;
-              var ext = name.split(".").last;
-              entry.renameSync("$savePath/$baseName.$ext");
+        // 只保留需要重命名的图片文件, 排除临时 zip 与封面
+        var files = Directory(savePath)
+            .listSync()
+            .whereType<File>()
+            .where(
+                (f) => !f.path.endsWith(".zip") && !f.path.contains("cover"))
+            .toList();
+
+        // 自然排序: 交替比较文件名中的数字段与文本段,
+        // 修正 1/10/2 这类纯字典序造成的页码错乱
+        int naturalCompare(String a, String b) {
+          final regex = RegExp(r'(\D+)|(\d+)');
+          final aParts = regex.allMatches(a).map((m) => m.group(0)!).toList();
+          final bParts = regex.allMatches(b).map((m) => m.group(0)!).toList();
+          for (var i = 0; i < aParts.length && i < bParts.length; i++) {
+            final numA = int.tryParse(aParts[i]);
+            final numB = int.tryParse(bParts[i]);
+            if (numA != null && numB != null) {
+              final cmp = numA.compareTo(numB);
+              if (cmp != 0) return cmp;
+            } else {
+              final cmp = aParts[i].compareTo(bParts[i]);
+              if (cmp != 0) return cmp;
             }
           }
+          return aParts.length.compareTo(bParts.length);
         }
+
+        files.sort((a, b) => naturalCompare(
+            a.path.split(pathSep).last, b.path.split(pathSep).last));
+
+        for (int index = 0; index < files.length; index++) {
+          final entry = files[index];
+          final ext = entry.path.split(".").last;
+          entry.renameSync("$savePath/$index.$ext");
+        }
+
+        // 解压用的临时 zip 用完即删
+        File("$savePath/temp.zip").deleteSync();
         sendPort.send("finish");
       }
       catch(e, s){
