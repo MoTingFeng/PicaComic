@@ -357,7 +357,7 @@ class _ComicSourceListState extends State<_ComicSourceList> {
   void load() async {
     var dio = logDio();
     var res = await dio.get<String>(
-        "https://raw.githubusercontent.com/wgh136/pica_configs/master/index.json");
+        "https://raw.githubusercontent.com/MoTingFeng/pica-sources/main/index.json");
     if (res.statusCode != 200) {
       showToast(message: "网络错误".tl);
       return;
@@ -398,8 +398,9 @@ class _ComicSourceListState extends State<_ComicSourceList> {
                   child: IconButton(
                     icon: const Icon(Icons.add),
                     onPressed: () async {
-                      await widget.onAdd(
-                          "https://raw.githubusercontent.com/wgh136/pica_configs/master/${json![index]["fileName"]}");
+                      var sourceUrl = json![index]["url"] ??
+                          "https://raw.githubusercontent.com/MoTingFeng/pica-sources/main/${json![index]["fileName"]}";
+                      await widget.onAdd(sourceUrl);
                       setState(() {});
                     },
                   ),
