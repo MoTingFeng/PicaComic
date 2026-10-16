@@ -6,46 +6,54 @@ class ComicSourceSettings extends StatefulWidget {
   @override
   State<ComicSourceSettings> createState() => _ComicSourceSettingsState();
 
-  // static void checkCustomComicSourceUpdate([bool showLoading = false]) async {
-  //   if (ComicSource.sources.isEmpty) {
-  //     return;
-  //   }
-  //   var controller = showLoading ? showLoadingDialog(App.globalContext!) : null;
-  //   var dio = logDio();
-  //   var res = await dio.get<String>(
-  //       "https://raw.githubusercontent.com/user/repo/master/index.json");
-  //   if (res.statusCode != 200) {
-  //     showToast(message: "网络错误".tl);
-  //     return;
-  //   }
-  //   var list = jsonDecode(res.data!) as List;
-  //   var versions = <String, String>{};
-  //   for (var source in list) {
-  //     versions[source['key']] = source['version'];
-  //   }
-  //   var shouldUpdate = <String>[];
-  //   for (var source in ComicSource.sources) {
-  //     if (versions.containsKey(source.key) &&
-  //         versions[source.key] != source.version) {
-  //       shouldUpdate.add(source.key);
-  //     }
-  //   }
-  //   controller?.close();
-  //   if (shouldUpdate.isEmpty) {
-  //     return;
-  //   }
-  //   var msg = "";
-  //   for (var key in shouldUpdate) {
-  //     msg += "${ComicSource.find(key)?.name}: v${versions[key]}\n";
-  //   }
-  //   msg = msg.trim();
-  //   showConfirmDialog(App.globalContext!, "有可用更新".tl, msg, () {
-  //     for (var key in shouldUpdate) {
-  //       var source = ComicSource.find(key);
-  //       _ComicSourceSettingsState.update(source!);
-  //     }
-  //   });
-  // }
+  static void checkCustomComicSourceUpdate([bool showLoading = false]) async {
+    if (ComicSource.sources.isEmpty) {
+      return;
+    }
+    var controller = showLoading ? showLoadingDialog(App.globalContext!) : null;
+    var dio = logDio();
+    var res = await dio.get<String>(
+        "https://raw.githubusercontent.com/MoTingFeng/pica-sources/main/index.json");
+    if (res.statusCode != 200) {
+      controller?.close();
+      showToast(message: "网络错误".tl);
+      return;
+    }
+    List list;
+    try {
+      list = jsonDecode(res.data!) as List;
+    } catch (e) {
+      controller?.close();
+      showToast(message: "源清单解析失败".tl);
+      return;
+    }
+    var versions = <String, String>{};
+    for (var source in list) {
+      versions[source['key']] = source['version'];
+    }
+    var shouldUpdate = <String>[];
+    for (var source in ComicSource.sources) {
+      if (versions.containsKey(source.key) &&
+          versions[source.key] != source.version) {
+        shouldUpdate.add(source.key);
+      }
+    }
+    controller?.close();
+    if (shouldUpdate.isEmpty) {
+      return;
+    }
+    var msg = "";
+    for (var key in shouldUpdate) {
+      msg += "${ComicSource.find(key)?.name}: v${versions[key]}\n";
+    }
+    msg = msg.trim();
+    showConfirmDialog(App.globalContext!, "有可用更新".tl, msg, () {
+      for (var key in shouldUpdate) {
+        var source = ComicSource.find(key);
+        _ComicSourceSettingsState.update(source!);
+      }
+    });
+  }
 }
 
 extension _WidgetExt on Widget {
@@ -81,7 +89,7 @@ class _ComicSourceSettingsState extends State<ComicSourceSettings> {
         if(appdata.appSettings.isComicSourceEnabled("htmanga"))
           // const HtSettings(false).withDivider(),
           const HtSettings(false),
-        // buildCustomSettings(),
+        buildCustomSettings(),
         for (var source in ComicSource.sources.where((e) => !e.isBuiltIn))
           buildCustom(context, source),
         Padding(
@@ -91,26 +99,26 @@ class _ComicSourceSettingsState extends State<ComicSourceSettings> {
     );
   }
 
-  // Widget buildCustomSettings() {
-  //   return Column(
-  //     children: [
-  //       ListTile(
-  //         title: Text("自定义漫画源".tl),
-  //       ),
-  //       ListTile(
-  //         leading: const Icon(Icons.update_outlined),
-  //         title: Text("检查更新".tl),
-  //         onTap: () => ComicSourceSettings.checkCustomComicSourceUpdate(true),
-  //         trailing: const Icon(Icons.arrow_right),
-  //       ),
-  //       SwitchSetting(
-  //         title: "启动时检查更新".tl,
-  //         icon: const Icon(Icons.security_update),
-  //         settingsIndex: 80,
-  //       )
-  //     ],
-  //   );
-  // }
+  Widget buildCustomSettings() {
+    return Column(
+      children: [
+        ListTile(
+          title: Text("自定义漫画源".tl),
+        ),
+        ListTile(
+          leading: const Icon(Icons.update_outlined),
+          title: Text("检查更新".tl),
+          onTap: () => ComicSourceSettings.checkCustomComicSourceUpdate(true),
+          trailing: const Icon(Icons.arrow_right),
+        ),
+        SwitchSetting(
+          title: "启动时检查更新".tl,
+          icon: const Icon(Icons.security_update),
+          settingsIndex: 80,
+        )
+      ],
+    );
+  }
 
   Widget buildCustom(BuildContext context, ComicSource source) {
     return Column(

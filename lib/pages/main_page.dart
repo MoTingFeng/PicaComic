@@ -154,9 +154,9 @@ class MainPageState extends State<MainPage> {
           );
         });
 
-    // if (appdata.settings[80] == "1") {
-    //   ComicSourceSettings.checkCustomComicSourceUpdate();
-    // }
+    if (appdata.settings[80] == "1") {
+      ComicSourceSettings.checkCustomComicSourceUpdate();
+    }
   }
 
   void _checkDownload() {
