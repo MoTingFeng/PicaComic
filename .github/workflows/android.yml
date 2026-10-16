@@ -72,7 +72,7 @@ jobs:
       - name: Build release APK
         run: |
           flutter build apk --release \
-            --build-name=4.2.11-mod \
+            --build-name=4.2.11-mod.${{ github.run_number }} \
             --build-number=${{ github.run_number }}
 
       - name: Upload APKs as artifact
