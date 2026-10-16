@@ -71,8 +71,9 @@ jobs:
 
       - name: Build release APK
         run: |
+          # 版本名来自 pubspec.yaml, 发版时只改那一处;
+          # versionCode 用 CI 构建号, 保证每次递增(覆盖安装需要)。
           flutter build apk --release \
-            --build-name=4.2.11-mod.${{ github.run_number }} \
             --build-number=${{ github.run_number }}
 
       - name: Upload APKs as artifact
@@ -100,10 +101,14 @@ jobs:
             -f sha="${GITHUB_SHA}" -F force=true >/dev/null 2>&1 \
             || echo "move tag ${TAG} skipped"
 
+          # 版本名统一从 pubspec.yaml 读取(发版时只改那一处)
+          VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//; s/+.*//')"
+          echo "release version: $VERSION"
+
           # 生成更新说明: 动态头部 + 仓库中维护的说明文件
           NOTES=release_notes.md
           {
-            echo "## PicaComic Mod · 4.2.11-mod"
+            echo "## PicaComic Mod · ${VERSION}"
             echo ""
             echo "构建 **#${BUILD_NO}** ｜ 源码 \`${SHORT_SHA}\` ｜ $(date -u '+%Y-%m-%d %H:%M UTC')"
             echo ""
@@ -115,7 +120,7 @@ jobs:
                  --title "PicaComic Mod" --notes "pending"
 
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "PicaComic Mod 4.2.11-mod (build ${BUILD_NO})" \
+            --title "PicaComic Mod ${VERSION} (build ${BUILD_NO})" \
             --notes-file "$NOTES"
 
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
