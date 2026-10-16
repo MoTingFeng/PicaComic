@@ -463,14 +463,20 @@ class _ImageDownloadWrapper {
         last = progress.currentBytes;
         if (progress.finished) {
           var data = progress.data ?? await progress.getFile().readAsBytes();
-          if (data.isNotEmpty){
-            var type = detectFileType(data);
-            var file = File("$path/$fileBaseName${type.ext}");
-            if (!await file.exists()) {
-              await file.create(recursive: true);
-            }
-            await file.writeAsBytes(data);
+          if (data.isEmpty) {
+            // 源站返回 0 字节(网络中断 / 被拦截 / 图片已失效)时不能算作成功:
+            // 否则上层会记为"这一页已完成", 但文件根本没写下来,
+            // 表现就是下载页显示已完成、点进去却缺页。
+            // 这里按失败处理并跳出, 交给 upper 层的重试逻辑。
+            error = Exception("Empty image data");
+            break;
           }
+          var type = detectFileType(data);
+          var file = File("$path/$fileBaseName${type.ext}");
+          if (!await file.exists()) {
+            await file.create(recursive: true);
+          }
+          await file.writeAsBytes(data);
           isFinished = true;
         }
       }
