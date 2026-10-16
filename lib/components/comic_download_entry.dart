@@ -235,6 +235,27 @@ Future<void> downloadComicsDirectly(
   var running = ValueNotifier<bool>(true);
   var cancelled = false;
 
+  /// 依次处理指定索引(首次为全量, 重试时只传失败项)
+  Future<void> runIndices(List<int> indices) async {
+    for (var i in indices) {
+      if (cancelled) {
+        break;
+      }
+      currentIndex.value = i;
+      var outcome = await downloadComicDirectly(
+        sourceKey: requests[i].key,
+        target: requests[i].target,
+        title: requests[i].title,
+        selectChapter: false,
+        silent: true,
+      );
+      var next = List<DownloadEnqueueOutcome?>.from(progress.value);
+      next[i] = outcome;
+      progress.value = next;
+    }
+    currentIndex.value = -1;
+  }
+
   showDialog(
     context: App.globalContext!,
     barrierDismissible: false,
@@ -249,26 +270,17 @@ Future<void> downloadComicsDirectly(
           dialogContext.pop();
         }
       },
+      onRetry: (indices) async {
+        // 之前若点过「中断」, cancelled 会停在 true, 这里必须复位才能继续处理
+        cancelled = false;
+        running.value = true;
+        await runIndices(indices);
+        running.value = false;
+      },
     ),
   );
 
-  for (var i = 0; i < requests.length; i++) {
-    if (cancelled) {
-      break;
-    }
-    currentIndex.value = i;
-    var outcome = await downloadComicDirectly(
-      sourceKey: requests[i].key,
-      target: requests[i].target,
-      title: requests[i].title,
-      selectChapter: false,
-      silent: true,
-    );
-    var next = List<DownloadEnqueueOutcome?>.from(progress.value);
-    next[i] = outcome;
-    progress.value = next;
-  }
-  currentIndex.value = -1;
+  await runIndices(List<int>.generate(requests.length, (i) => i));
   running.value = false;
 }
 
@@ -292,6 +304,7 @@ class _BatchDownloadPanel extends StatefulWidget {
     required this.running,
     required this.onCancel,
     required this.onClose,
+    required this.onRetry,
   });
 
   final List<({String key, String target, String title})> requests;
@@ -300,6 +313,7 @@ class _BatchDownloadPanel extends StatefulWidget {
   final ValueNotifier<bool> running;
   final void Function() onCancel;
   final void Function() onClose;
+  final void Function(List<int> failedIndices) onRetry;
 
   @override
   State<_BatchDownloadPanel> createState() => _BatchDownloadPanelState();
@@ -470,20 +484,38 @@ class _BatchDownloadPanelState extends State<_BatchDownloadPanel> {
                 ],
               );
             }
-            return Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextButton(
-                  onPressed: () {
-                    widget.onClose();
-                    App.globalTo(() => const DownloadPage());
-                  },
-                  child: Text("查看下载".tl),
-                ),
-                const SizedBox(width: 8),
-                FilledButton(
-                    onPressed: widget.onClose, child: Text("关闭".tl)),
-              ],
+            return ValueListenableBuilder<List<DownloadEnqueueOutcome?>>(
+              valueListenable: widget.progress,
+              builder: (context, results, _) {
+                var failed = <int>[
+                  for (var i = 0; i < results.length; i++)
+                    if (results[i]?.result == DownloadEnqueueResult.failed) i,
+                ];
+                return Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextButton(
+                      onPressed: () {
+                        widget.onClose();
+                        App.globalTo(() => const DownloadPage());
+                      },
+                      child: Text("查看下载".tl),
+                    ),
+                    if (failed.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      FilledButton.tonal(
+                        onPressed: () => widget.onRetry(failed),
+                        child: Text("重试失败项 (@a)".tlParams({
+                          "a": "${failed.length}",
+                        })),
+                      ),
+                    ],
+                    const SizedBox(width: 8),
+                    FilledButton(
+                        onPressed: widget.onClose, child: Text("关闭".tl)),
+                  ],
+                );
+              },
             );
           },
         ),
