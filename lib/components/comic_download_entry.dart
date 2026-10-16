@@ -15,6 +15,42 @@ enum DownloadEnqueueResult {
   failed,
 }
 
+/// 单本漫画的处理结果 + 展示用的信息。
+class DownloadEnqueueOutcome {
+  const DownloadEnqueueOutcome(
+    this.result, {
+    this.epCount,
+    this.pageCount,
+    this.epIds,
+    this.message,
+  });
+
+  final DownloadEnqueueResult result;
+
+  /// 话数(整本源恒为 1)
+  final int? epCount;
+
+  /// 总页数; 源未提供时为 null(例如禁漫)
+  final int? pageCount;
+
+  /// 逐话标识, 供展开时按需查询每话页数; 整本源为 null
+  final List<String>? epIds;
+
+  /// 失败原因
+  final String? message;
+
+  String get summary {
+    var parts = <String>[];
+    if (epCount != null) {
+      parts.add(epCount! <= 1 ? "1话".tl : "@c话".tlParams({"c": "$epCount"}));
+    }
+    if (pageCount != null) {
+      parts.add("@cP".tlParams({"c": "$pageCount"}));
+    }
+    return parts.join(" · ");
+  }
+}
+
 /// 下载标识规则, 与 [FavoriteItem.toDownloadId] 保持一致。
 String _downloadIdOf(String sourceKey, String target) {
   switch (sourceKey) {
@@ -54,6 +90,32 @@ Future<List<int>> _downloadedEpsOf(String downloadId) async {
   }
   var item = await DownloadManager().getComicOrNull(downloadId);
   return item?.downloadedEps.toList() ?? [];
+}
+
+/// 查询某一话的页数, 用于批量面板展开时按需加载。
+///
+/// [epId] 对 picacg 是章节序号, 对禁漫是 chapter id, 对自定义源是章节 id。
+Future<int?> loadEpPageCount(
+    String sourceKey, String target, String epId) async {
+  try {
+    if (sourceKey == 'picacg') {
+      final res = await PicacgNetwork()
+          .getComicContent(target, int.tryParse(epId) ?? 0);
+      return res.error ? null : res.data.length;
+    }
+    if (sourceKey == 'jm') {
+      final res = await JmNetwork().getChapter(epId);
+      return res.error ? null : res.data.length;
+    }
+    final source = ComicSource.find(sourceKey);
+    if (source == null || source.loadComicPages == null) {
+      return null;
+    }
+    final res = await source.loadComicPages!(target, epId);
+    return res.error ? null : res.data.length;
+  } catch (_) {
+    return null;
+  }
 }
 
 /// 确认框。[count] 为 null 表示单本下载。
@@ -125,7 +187,7 @@ List<int> _missingEps(List<String> eps, List<int> downloaded) {
 /// e-hentai 与 hitomi 是链接); [title] 仅用于确认提示。
 /// [selectChapter] 为 false 时(批量下载)不弹章节框, 直接补下缺失章节。
 /// [silent] 为 true 时不弹任何单本对话框、也不发提示, 由调用方统一展示进度。
-Future<DownloadEnqueueResult> downloadComicDirectly({
+Future<DownloadEnqueueOutcome> downloadComicDirectly({
   required String sourceKey,
   required String target,
   required String title,
@@ -137,7 +199,8 @@ Future<DownloadEnqueueResult> downloadComicDirectly({
     if (!silent) {
       showToast(message: "下载中".tl);
     }
-    return DownloadEnqueueResult.skipped;
+    return const DownloadEnqueueOutcome(DownloadEnqueueResult.skipped,
+        message: "已在下载队列中");
   }
 
   if (sourceKey == 'picacg') {
@@ -154,8 +217,8 @@ Future<DownloadEnqueueResult> downloadComicDirectly({
 
 /// 批量下载: 确认一次后, 用进度面板逐本入队。
 ///
-/// 面板会列出每一本漫画及其状态(等待中/处理中/已加入队列/已下载跳过/失败),
-/// 处理过程中可中断, 剩余的不再入队。
+/// 面板列出每一本漫画及其状态与话数/页数, 每本可展开查看逐话页数
+/// (展开时才请求)。处理过程中可中断, 剩余的不再入队。
 Future<void> downloadComicsDirectly(
     List<({String key, String target, String title})> requests) async {
   if (requests.isEmpty) {
@@ -166,8 +229,8 @@ Future<void> downloadComicsDirectly(
     return;
   }
 
-  var progress = ValueNotifier<List<DownloadEnqueueResult?>>(
-      List<DownloadEnqueueResult?>.filled(requests.length, null));
+  var progress = ValueNotifier<List<DownloadEnqueueOutcome?>>(
+      List<DownloadEnqueueOutcome?>.filled(requests.length, null));
   var currentIndex = ValueNotifier<int>(-1);
   var running = ValueNotifier<bool>(true);
   var cancelled = false;
@@ -194,23 +257,34 @@ Future<void> downloadComicsDirectly(
       break;
     }
     currentIndex.value = i;
-    var result = await downloadComicDirectly(
+    var outcome = await downloadComicDirectly(
       sourceKey: requests[i].key,
       target: requests[i].target,
       title: requests[i].title,
       selectChapter: false,
       silent: true,
     );
-    var next = List<DownloadEnqueueResult?>.from(progress.value);
-    next[i] = result;
+    var next = List<DownloadEnqueueOutcome?>.from(progress.value);
+    next[i] = outcome;
     progress.value = next;
   }
   currentIndex.value = -1;
   running.value = false;
 }
 
-/// 批量下载进度面板。
-class _BatchDownloadPanel extends StatelessWidget {
+/// 查询某本漫画在下载队列中的进度; 不在队列中返回 null。
+({int done, int total})? _queueProgress(String sourceKey, String target) {
+  var id = _downloadIdOf(sourceKey, target);
+  for (var item in DownloadManager().downloading) {
+    if (item.id == id) {
+      return (done: item.downloadedPages, total: item.totalPages);
+    }
+  }
+  return null;
+}
+
+/// 批量下载进度面板: 每本一行, 可展开查看逐话页数。
+class _BatchDownloadPanel extends StatefulWidget {
   const _BatchDownloadPanel({
     required this.requests,
     required this.progress,
@@ -221,33 +295,135 @@ class _BatchDownloadPanel extends StatelessWidget {
   });
 
   final List<({String key, String target, String title})> requests;
-  final ValueNotifier<List<DownloadEnqueueResult?>> progress;
+  final ValueNotifier<List<DownloadEnqueueOutcome?>> progress;
   final ValueNotifier<int> currentIndex;
   final ValueNotifier<bool> running;
   final void Function() onCancel;
   final void Function() onClose;
 
   @override
+  State<_BatchDownloadPanel> createState() => _BatchDownloadPanelState();
+}
+
+class _BatchDownloadPanelState extends State<_BatchDownloadPanel> {
+  /// 定时刷新下载进度的计时器
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    // 下载过程中每张图都会触发一次队列通知, 直接监听会让整个列表被高频重建;
+    // 这里改成固定间隔刷新, 且队列为空时不做任何事。
+    _ticker = Timer.periodic(const Duration(milliseconds: 800), (_) {
+      if (!mounted) {
+        return;
+      }
+      if (DownloadManager().downloading.isEmpty) {
+        return;
+      }
+      setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  /// 已展开的行
+  final _expanded = <int>{};
+
+  /// 已加载的逐话页数: 行号 -> 每话页数(null 表示取不到)
+  final _epPages = <int, List<int?>>{};
+
+  /// 正在加载逐话页数的行
+  final _loading = <int>{};
+
+  Future<void> _toggleExpanded(int index) async {
+    if (_expanded.contains(index)) {
+      setState(() => _expanded.remove(index));
+      return;
+    }
+    setState(() => _expanded.add(index));
+
+    var outcome = widget.progress.value[index];
+    var epIds = outcome?.epIds;
+    if (epIds == null || epIds.isEmpty) {
+      return;
+    }
+    if (_epPages.containsKey(index) || _loading.contains(index)) {
+      return;
+    }
+    setState(() => _loading.add(index));
+
+    var request = widget.requests[index];
+    // 分批并发查询, 避免逐个往返(一本 20 话串行要几十秒);
+    // 每批完成就刷新一次, 边查边显示
+    var pages = List<int?>.filled(epIds.length, null);
+    const batchSize = 4;
+    for (var start = 0; start < epIds.length; start += batchSize) {
+      var end = math.min(start + batchSize, epIds.length);
+      var batch = await Future.wait([
+        for (var i = start; i < end; i++)
+          loadEpPageCount(request.key, request.target, epIds[i]),
+      ]);
+      for (var i = start; i < end; i++) {
+        pages[i] = batch[i - start];
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() => _epPages[index] = List<int?>.from(pages));
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _epPages[index] = pages;
+      _loading.remove(index);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
-    var width = math.min(400.0, MediaQuery.of(context).size.width - 64);
+    var width = math.min(420.0, MediaQuery.of(context).size.width - 56);
     return AlertDialog(
       titlePadding: const EdgeInsets.fromLTRB(20, 18, 20, 4),
-      contentPadding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
+      contentPadding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
       title: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text("批量加入下载队列".tl, style: const TextStyle(fontSize: 19)),
-          const SizedBox(
-            height: 4,
-          ),
-          ValueListenableBuilder<List<DownloadEnqueueResult?>>(
-            valueListenable: progress,
+          const SizedBox(height: 4),
+          ValueListenableBuilder<List<DownloadEnqueueOutcome?>>(
+            valueListenable: widget.progress,
             builder: (context, results, _) {
               var done = results.where((e) => e != null).length;
+              var text = "已处理 @a / @b 本".tlParams(
+                  {"a": "$done", "b": "${widget.requests.length}"});
+              // 全部处理完时补一段汇总, 省得自己数
+              if (done == widget.requests.length &&
+                  widget.requests.isNotEmpty) {
+                var queued = results
+                    .where((e) => e?.result == DownloadEnqueueResult.queued)
+                    .length;
+                var skipped = results
+                    .where((e) => e?.result == DownloadEnqueueResult.skipped)
+                    .length;
+                var failed = results
+                    .where((e) => e?.result == DownloadEnqueueResult.failed)
+                    .length;
+                text += "   ·   " +
+                    "入队 @a · 跳过 @b · 失败 @c".tlParams({
+                      "a": "$queued",
+                      "b": "$skipped",
+                      "c": "$failed",
+                    });
+              }
               return Text(
-                "已处理 @a / @b 本".tlParams(
-                    {"a": "$done", "b": "${requests.length}"}),
+                text,
                 style: TextStyle(
                   fontSize: 13,
                   color: Theme.of(context).colorScheme.outline,
@@ -259,18 +435,19 @@ class _BatchDownloadPanel extends StatelessWidget {
       ),
       content: SizedBox(
         width: width,
-        height: math.min(340.0, MediaQuery.of(context).size.height * 0.5),
-        child: ValueListenableBuilder<List<DownloadEnqueueResult?>>(
-          valueListenable: progress,
+        height: math.min(360.0, MediaQuery.of(context).size.height * 0.55),
+        // 下载进度由 initState 里的定时器驱动刷新, 避免逐图重建
+        child: ValueListenableBuilder<List<DownloadEnqueueOutcome?>>(
+          valueListenable: widget.progress,
           builder: (context, results, _) {
             return ValueListenableBuilder<int>(
-              valueListenable: currentIndex,
+              valueListenable: widget.currentIndex,
               builder: (context, current, _) {
                 return ListView.builder(
                   padding: EdgeInsets.zero,
-                  itemCount: requests.length,
-                  itemBuilder: (context, i) => _buildRow(
-                      context, i, results[i], current == i, results[i] == null),
+                  itemCount: widget.requests.length,
+                  itemBuilder: (context, i) => _buildEntry(context, i,
+                      results[i], current == i, results[i] == null),
                 );
               },
             );
@@ -280,31 +457,47 @@ class _BatchDownloadPanel extends StatelessWidget {
       actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       actions: [
         ValueListenableBuilder<bool>(
-          valueListenable: running,
+          valueListenable: widget.running,
           builder: (context, isRunning, _) {
             if (isRunning) {
               return Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  TextButton(onPressed: onCancel, child: Text("中断".tl)),
-                  const SizedBox(
-                    width: 8,
-                  ),
-                  FilledButton(onPressed: onClose, child: Text("后台运行".tl)),
+                  TextButton(onPressed: widget.onCancel, child: Text("中断".tl)),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                      onPressed: widget.onClose, child: Text("后台运行".tl)),
                 ],
               );
             }
-            return FilledButton(onPressed: onClose, child: Text("关闭".tl));
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextButton(
+                  onPressed: () {
+                    widget.onClose();
+                    App.globalTo(() => const DownloadPage());
+                  },
+                  child: Text("查看下载".tl),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                    onPressed: widget.onClose, child: Text("关闭".tl)),
+              ],
+            );
           },
         ),
       ],
     );
   }
 
-  Widget _buildRow(BuildContext context, int index,
-      DownloadEnqueueResult? result, bool isCurrent, bool pending) {
+  /// 一本书的整块内容: 汇总行 + (展开时的)逐话明细
+  Widget _buildEntry(BuildContext context, int index,
+      DownloadEnqueueOutcome? outcome, bool isCurrent, bool pending) {
     var scheme = Theme.of(context).colorScheme;
-    var (IconData icon, Color? color, String status) = switch (result) {
+    var request = widget.requests[index];
+
+    var (IconData icon, Color? color, String status) = switch (outcome?.result) {
       null when isCurrent => (Icons.sync, scheme.primary, "处理中…".tl),
       null => (Icons.schedule, null, "等待中".tl),
       DownloadEnqueueResult.queued =>
@@ -315,41 +508,178 @@ class _BatchDownloadPanel extends StatelessWidget {
         (Icons.error_outline, scheme.error, "失败".tl),
     };
 
-    return ListTile(
-      dense: true,
-      visualDensity: VisualDensity.compact,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-      leading: isCurrent && pending
-          ? const SizedBox(
-              width: 18,
-              height: 18,
+    var summary = outcome?.summary ?? "";
+    var canExpand = (outcome?.epIds?.isNotEmpty ?? false);
+    var isExpanded = _expanded.contains(index);
+    var progress = _queueProgress(request.key, request.target);
+    var failedMessage = outcome?.result == DownloadEnqueueResult.failed
+        ? outcome?.message
+        : null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        InkWell(
+          onTap: canExpand ? () => _toggleExpanded(index) : null,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Row(
+              children: [
+                if (isCurrent && pending)
+                  const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else
+                  Icon(icon, size: 20, color: color),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        request.title.replaceAll("\n", ""),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      if (summary.isNotEmpty)
+                        Text(
+                          summary,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: scheme.outline,
+                          ),
+                        ),
+                      if (failedMessage != null)
+                        Text(
+                          failedMessage,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: scheme.error,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                if (progress != null && progress.total > 0)
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        "${progress.done}/${progress.total}页",
+                        style: TextStyle(fontSize: 12, color: color),
+                      ),
+                      const SizedBox(height: 3),
+                      SizedBox(
+                        width: 64,
+                        child: LinearProgressIndicator(
+                          value: progress.done / progress.total,
+                          minHeight: 4,
+                        ),
+                      ),
+                    ],
+                  )
+                else
+                  Text(
+                    status,
+                    style: TextStyle(fontSize: 12, color: color),
+                  ),
+                if (canExpand)
+                  Icon(
+                    isExpanded ? Icons.expand_less : Icons.expand_more,
+                    size: 18,
+                    color: scheme.outline,
+                  ),
+              ],
+            ),
+          ),
+        ),
+        if (isExpanded) _buildEpDetail(context, index, outcome),
+      ],
+    );
+  }
+
+  /// 展开后的逐话页数; 加载中显示进度
+  Widget _buildEpDetail(
+      BuildContext context, int index, DownloadEnqueueOutcome? outcome) {
+    var scheme = Theme.of(context).colorScheme;
+    if (_loading.contains(index)) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(44, 2, 8, 8),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 14,
+              height: 14,
               child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : Icon(icon, size: 20, color: color),
-      title: Text(
-        requests[index].title.replaceAll("\n", ""),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 14),
-      ),
-      trailing: Text(
-        status,
-        style: TextStyle(fontSize: 12, color: color),
+            ),
+            const SizedBox(width: 8),
+            Text("正在读取每话页数…".tl,
+                style: TextStyle(fontSize: 12, color: scheme.outline)),
+          ],
+        ),
+      );
+    }
+    var pages = _epPages[index];
+    var epIds = outcome?.epIds ?? const <String>[];
+    if (pages == null) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(44, 0, 8, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (int i = 0; i < epIds.length; i++)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      "第 @c 话".tlParams({"c": "${i + 1}"}),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  Text(
+                    i < pages.length && pages[i] != null
+                        ? "@c页".tlParams({"c": "${pages[i]}"})
+                        : "页数未知".tl,
+                    style: TextStyle(fontSize: 12, color: scheme.outline),
+                  ),
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }
 }
 
-Future<DownloadEnqueueResult> _downloadPicacg(
+Future<DownloadEnqueueOutcome> _downloadPicacg(
     String target, String downloadId, bool selectChapter, bool silent) async {
   final res = await PicacgNetwork().getComicInfo(target);
   if (res.error) {
     if (!silent) {
       showToast(message: res.errorMessage ?? "Error");
     }
-    return DownloadEnqueueResult.failed;
+    return DownloadEnqueueOutcome(DownloadEnqueueResult.failed,
+        message: res.errorMessage);
   }
   final comic = res.data;
+  var epIds = List<String>.generate(comic.eps.length, (i) => "$i");
+  var outcomeBase = (
+    epCount: comic.eps.length,
+    pageCount: comic.pagesCount > 0 ? comic.pagesCount : null,
+    epIds: epIds,
+  );
   var downloaded = await _downloadedEpsOf(downloadId);
   if (!selectChapter) {
     var missing = _missingEps(comic.eps, downloaded);
@@ -357,28 +687,39 @@ Future<DownloadEnqueueResult> _downloadPicacg(
       if (!silent) {
         showToast(message: "已下载".tl);
       }
-      return DownloadEnqueueResult.skipped;
+      return DownloadEnqueueOutcome(DownloadEnqueueResult.skipped,
+          epCount: outcomeBase.epCount,
+          pageCount: outcomeBase.pageCount,
+          epIds: outcomeBase.epIds,
+          message: "已下载");
     }
     DownloadManager().addPicDownload(comic, missing);
     if (!silent) {
       showToast(message: "已加入下载队列".tl);
     }
-    return DownloadEnqueueResult.queued;
+    return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+        epCount: outcomeBase.epCount,
+        pageCount: outcomeBase.pageCount,
+        epIds: outcomeBase.epIds);
   }
   _showChapterSelector(comic.eps, downloaded, (selected) {
     DownloadManager().addPicDownload(comic, selected);
   });
-  return DownloadEnqueueResult.queued;
+  return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+      epCount: outcomeBase.epCount,
+      pageCount: outcomeBase.pageCount,
+      epIds: outcomeBase.epIds);
 }
 
-Future<DownloadEnqueueResult> _downloadJm(
+Future<DownloadEnqueueOutcome> _downloadJm(
     String target, String downloadId, bool selectChapter, bool silent) async {
   final res = await JmNetwork().getComicInfo(target);
   if (res.error) {
     if (!silent) {
       showToast(message: res.errorMessage ?? "Error");
     }
-    return DownloadEnqueueResult.failed;
+    return DownloadEnqueueOutcome(DownloadEnqueueResult.failed,
+        message: res.errorMessage);
   }
   final comic = res.data;
   List<String> eps;
@@ -388,6 +729,9 @@ Future<DownloadEnqueueResult> _downloadJm(
     eps = List<String>.generate(comic.series.length,
         (index) => "第 @c 章".tlParams({"c": (index + 1).toString()}));
   }
+  // 禁漫的漫画信息里没有页数, 只给话数; 展开时才逐话查询
+  // (series 为空即单话, 此时不提供展开)
+  var epIds = comic.series.values.map((e) => e.toString()).toList();
   var downloaded = await _downloadedEpsOf(downloadId);
   if (!selectChapter) {
     var missing = _missingEps(eps, downloaded);
@@ -395,38 +739,44 @@ Future<DownloadEnqueueResult> _downloadJm(
       if (!silent) {
         showToast(message: "已下载".tl);
       }
-      return DownloadEnqueueResult.skipped;
+      return DownloadEnqueueOutcome(DownloadEnqueueResult.skipped,
+          epCount: eps.length, epIds: epIds, message: "已下载");
     }
     DownloadManager().addJmDownload(comic, missing);
     if (!silent) {
       showToast(message: "已加入下载队列".tl);
     }
-    return DownloadEnqueueResult.queued;
+    return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+        epCount: eps.length, epIds: epIds);
   }
   _showChapterSelector(eps, downloaded, (selected) {
     DownloadManager().addJmDownload(comic, selected);
   });
-  return DownloadEnqueueResult.queued;
+  return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+      epCount: eps.length, epIds: epIds);
 }
 
-Future<DownloadEnqueueResult> _downloadCustomSource(String sourceKey,
+Future<DownloadEnqueueOutcome> _downloadCustomSource(String sourceKey,
     String target, String downloadId, bool selectChapter, bool silent) async {
   final source = ComicSource.find(sourceKey);
   if (source == null || source.loadComicInfo == null) {
     if (!silent) {
       showToast(message: "该漫画源不支持下载".tl);
     }
-    return DownloadEnqueueResult.failed;
+    return const DownloadEnqueueOutcome(DownloadEnqueueResult.failed,
+        message: "该漫画源不支持下载");
   }
   final res = await source.loadComicInfo!(target);
   if (res.error) {
     if (!silent) {
       showToast(message: res.errorMessage ?? "Error");
     }
-    return DownloadEnqueueResult.failed;
+    return DownloadEnqueueOutcome(DownloadEnqueueResult.failed,
+        message: res.errorMessage);
   }
   final data = res.data;
-  final eps = data.chapters?.values.toList();
+  final chapters = data.chapters;
+  final eps = chapters?.values.toList();
   if (eps == null || eps.isEmpty) {
     // 单话漫画, 没有章节可选
     if (DownloadManager().isExists(downloadId) ||
@@ -434,14 +784,17 @@ Future<DownloadEnqueueResult> _downloadCustomSource(String sourceKey,
       if (!silent) {
         showToast(message: "已下载".tl);
       }
-      return DownloadEnqueueResult.skipped;
+      return const DownloadEnqueueOutcome(DownloadEnqueueResult.skipped,
+          epCount: 1, message: "已下载");
     }
     DownloadManager().addCustomDownload(data, [0]);
     if (!silent) {
       showToast(message: "已加入下载队列".tl);
     }
-    return DownloadEnqueueResult.queued;
+    return const DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+        epCount: 1);
   }
+  var epIds = chapters!.keys.toList();
   var downloaded = await _downloadedEpsOf(downloadId);
   if (!selectChapter) {
     var missing = _missingEps(eps, downloaded);
@@ -449,33 +802,38 @@ Future<DownloadEnqueueResult> _downloadCustomSource(String sourceKey,
       if (!silent) {
         showToast(message: "已下载".tl);
       }
-      return DownloadEnqueueResult.skipped;
+      return DownloadEnqueueOutcome(DownloadEnqueueResult.skipped,
+          epCount: eps.length, epIds: epIds, message: "已下载");
     }
     DownloadManager().addCustomDownload(data, missing);
     if (!silent) {
       showToast(message: "已加入下载队列".tl);
     }
-    return DownloadEnqueueResult.queued;
+    return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+        epCount: eps.length, epIds: epIds);
   }
   _showChapterSelector(eps, downloaded, (selected) {
     DownloadManager().addCustomDownload(data, selected);
   });
-  return DownloadEnqueueResult.queued;
+  return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+      epCount: eps.length, epIds: epIds);
 }
 
 /// e-hentai / hitomi / 绅士漫画 / nhentai: 一本即全部内容。
 ///
 /// [silent] 为 true(批量下载)时跳过单本确认框 —— 否则多选 N 本要点 N 次。
-Future<DownloadEnqueueResult> _downloadWholeComic(String sourceKey,
+Future<DownloadEnqueueOutcome> _downloadWholeComic(String sourceKey,
     String target, String title, String downloadId, bool silent) async {
   if (DownloadManager().isExists(downloadId)) {
     if (!silent) {
       showToast(message: "已下载".tl);
     }
-    return DownloadEnqueueResult.skipped;
+    return const DownloadEnqueueOutcome(DownloadEnqueueResult.skipped,
+        epCount: 1, message: "已下载");
   }
   if (!silent && !await _confirmDownload(title)) {
-    return DownloadEnqueueResult.skipped;
+    return const DownloadEnqueueOutcome(DownloadEnqueueResult.skipped,
+        message: "已取消");
   }
   switch (sourceKey) {
     case 'ehentai':
@@ -484,45 +842,64 @@ Future<DownloadEnqueueResult> _downloadWholeComic(String sourceKey,
         if (!silent) {
           showToast(message: res.errorMessage ?? "Error");
         }
-        return DownloadEnqueueResult.failed;
+        return DownloadEnqueueOutcome(DownloadEnqueueResult.failed,
+            message: res.errorMessage);
       }
       DownloadManager().addEhDownload(res.data);
-      break;
+      if (!silent) {
+        showToast(message: "已加入下载队列".tl);
+      }
+      // E 站的详情里只有分页大小, 没有总页数, 因此只显示话数
+      return const DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+          epCount: 1);
     case 'hitomi':
       final res = await HiNetwork().getComicInfo(target);
       if (res.error) {
         if (!silent) {
           showToast(message: res.errorMessage ?? "Error");
         }
-        return DownloadEnqueueResult.failed;
+        return DownloadEnqueueOutcome(DownloadEnqueueResult.failed,
+            message: res.errorMessage);
       }
+      var pages = res.data.files.length;
       DownloadManager().addHitomiDownload(res.data, res.data.cover, target);
-      break;
+      if (!silent) {
+        showToast(message: "已加入下载队列".tl);
+      }
+      return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+          epCount: 1, pageCount: pages > 0 ? pages : null);
     case 'htmanga':
       final res = await HtmangaNetwork().getComicInfo(target);
       if (res.error) {
         if (!silent) {
           showToast(message: res.errorMessage ?? "Error");
         }
-        return DownloadEnqueueResult.failed;
+        return DownloadEnqueueOutcome(DownloadEnqueueResult.failed,
+            message: res.errorMessage);
       }
       DownloadManager().addHtDownload(res.data);
-      break;
+      if (!silent) {
+        showToast(message: "已加入下载队列".tl);
+      }
+      return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+          epCount: 1, pageCount: res.data.pages > 0 ? res.data.pages : null);
     case 'nhentai':
       final res = await NhentaiNetwork().getComicInfo(target);
       if (res.error) {
         if (!silent) {
           showToast(message: res.errorMessage ?? "Error");
         }
-        return DownloadEnqueueResult.failed;
+        return DownloadEnqueueOutcome(DownloadEnqueueResult.failed,
+            message: res.errorMessage);
       }
       DownloadManager().addNhentaiDownload(res.data);
-      break;
+      if (!silent) {
+        showToast(message: "已加入下载队列".tl);
+      }
+      var thumbs = res.data.thumbnails.length;
+      return DownloadEnqueueOutcome(DownloadEnqueueResult.queued,
+          epCount: 1, pageCount: thumbs > 0 ? thumbs : null);
     default:
-      return DownloadEnqueueResult.failed;
+      return const DownloadEnqueueOutcome(DownloadEnqueueResult.failed);
   }
-  if (!silent) {
-    showToast(message: "已加入下载队列".tl);
-  }
-  return DownloadEnqueueResult.queued;
 }

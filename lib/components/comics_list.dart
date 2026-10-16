@@ -676,7 +676,7 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
                   logic.selectAll(comics.map((e) => e.id));
                 }
               },
-              child: Text(allSelected ? "取消全选".tl : "全选".tl),
+              child: Text(allSelected ? "取消全选".tl : "全选本页".tl),
             ),
             const SizedBox(
               width: 4,

@@ -413,10 +413,7 @@ class DownloadPage extends StatelessWidget {
           }.call(),
           onLongTap: () {
             if (logic.selecting) return;
-            logic.selected[index] = true;
-            logic.selectedNum++;
-            logic.selecting = true;
-            logic.update();
+            showDownloadedComicMenu(context, logic, index);
           },
           onSecondaryTap: (details) {
             showDesktopMenu(App.globalContext!,
@@ -1074,6 +1071,119 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
   void readSpecifiedEps(int i) {
     comic.read(ep: i + 1);
   }
+}
+
+/// 下载页长按已下载漫画时的菜单。
+///
+/// 「继续下载」只补缺失或失败的章节(已下好的不动);
+/// 「重新下载」会先删掉已有内容再整本重下。
+void showDownloadedComicMenu(
+    BuildContext context, DownloadPageLogic logic, int index) {
+  var item = logic.comics[index];
+  final key = item.sourceKey;
+  final target = item.reDownloadTarget;
+  var canDownload = key != null && target != null;
+
+  showModalBottomSheet(
+    context: App.globalContext!,
+    builder: (sheetContext) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+            child: Text(
+              item.name.replaceAll("\n", ""),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 16),
+            ),
+          ),
+          const Divider(height: 1),
+          ListTile(
+            leading: const Icon(Icons.chrome_reader_mode),
+            title: Text("阅读".tl),
+            onTap: () {
+              sheetContext.pop();
+              item.read();
+            },
+          ),
+          if (canDownload)
+            ListTile(
+              leading: const Icon(Icons.download_for_offline_outlined),
+              title: Text("继续下载".tl),
+              subtitle: Text("只补下缺失或失败的章节".tl),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                downloadComicDirectly(
+                  sourceKey: key,
+                  target: target,
+                  title: item.name,
+                  selectChapter: false,
+                );
+              },
+            ),
+          if (canDownload)
+            ListTile(
+              leading: const Icon(Icons.refresh),
+              title: Text("重新下载".tl),
+              subtitle: Text("清空已下载内容后整本重下".tl),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                showConfirmDialog(
+                  App.globalContext!,
+                  "确认重新下载".tl,
+                  "会先删除已下载的内容, 再重新下载整本。是否继续?".tl,
+                  () async {
+                    await DownloadManager().delete([item.id]);
+                    logic.comics.removeAt(index);
+                    logic.selected.removeAt(index);
+                    logic.update();
+                    await downloadComicDirectly(
+                      sourceKey: key,
+                      target: target,
+                      title: item.name,
+                      selectChapter: false,
+                    );
+                  },
+                );
+              },
+            ),
+          ListTile(
+            leading: const Icon(Icons.delete_outline),
+            title: Text("删除".tl),
+            onTap: () {
+              sheetContext.pop();
+              showConfirmDialog(
+                App.globalContext!,
+                "确认删除".tl,
+                "此操作无法撤销, 是否继续?".tl,
+                () {
+                  DownloadManager().delete([item.id]);
+                  logic.comics.removeAt(index);
+                  logic.selected.removeAt(index);
+                  logic.update();
+                },
+              );
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.checklist),
+            title: Text("多选".tl),
+            onTap: () {
+              sheetContext.pop();
+              logic.selected[index] = true;
+              logic.selectedNum++;
+              logic.selecting = true;
+              logic.update();
+            },
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
 }
 
 class DownloadedComicTile extends ComicTile {

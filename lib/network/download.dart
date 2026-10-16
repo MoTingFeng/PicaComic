@@ -454,6 +454,60 @@ DownloadingItem downloadingItemFromMap(
   }
 }
 
+/// 从已下载记录反推「继续下载 / 重新下载」所需的源标识与原始标识。
+///
+/// 各源的下载 id 规则不同(见 [DownloadedItem.id]), 这里统一还原,
+/// 供下载页的长按菜单使用。hitomi 与 e-hentai 的原始链接存在记录内部,
+/// 需要靠类型判断取回。
+extension DownloadedItemExt on DownloadedItem {
+  /// 该记录所属的漫画源 key; 无法判断时为 null
+  String? get sourceKey {
+    switch (type) {
+      case DownloadType.picacg:
+        return 'picacg';
+      case DownloadType.ehentai:
+        return 'ehentai';
+      case DownloadType.jm:
+        return 'jm';
+      case DownloadType.hitomi:
+        return 'hitomi';
+      case DownloadType.htmanga:
+        return 'htmanga';
+      case DownloadType.nhentai:
+        return 'nhentai';
+      default:
+        // 自定义源: id 形如 "<sourceKey>-<comicId>"
+        var i = id.indexOf('-');
+        return i > 0 ? id.substring(0, i) : null;
+    }
+  }
+
+  /// 传给源接口的原始标识; 无法还原时为 null
+  String? get reDownloadTarget {
+    switch (type) {
+      case DownloadType.picacg:
+        return id;
+      case DownloadType.ehentai:
+        return this is DownloadedGallery
+            ? (this as DownloadedGallery).gallery.link
+            : null;
+      case DownloadType.jm:
+        return id.startsWith('jm') ? id.substring(2) : null;
+      case DownloadType.hitomi:
+        return this is DownloadedHitomiComic
+            ? (this as DownloadedHitomiComic).link
+            : null;
+      case DownloadType.htmanga:
+        return id.startsWith('Ht') ? id.substring(2) : null;
+      case DownloadType.nhentai:
+        return id.startsWith('nhentai') ? id.substring(7) : null;
+      default:
+        var i = id.indexOf('-');
+        return i > 0 ? id.substring(i + 1) : null;
+    }
+  }
+}
+
 extension AddDownloadExt on DownloadManager {
   /// 统一入队: 同一漫画(同 id)不重复添加, 防止重复下载与下载页出现重复任务
   void _enqueueDownload(DownloadingItem item) {
