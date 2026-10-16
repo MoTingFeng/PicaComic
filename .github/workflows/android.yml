@@ -72,9 +72,13 @@ jobs:
       - name: Build release APK
         run: |
           # 版本名来自 pubspec.yaml, 发版时只改那一处;
-          # versionCode 用 CI 构建号, 保证每次递增(覆盖安装需要)。
+          # versionCode = pubspec 的 `+基数` + CI 构建号, 保证单调递增(覆盖安装需要)。
+          # 基数必须大于历史上发布过的任何 versionCode, 否则会被系统判定为降级而拒绝安装。
+          BASE=$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//; s/.*+//')
+          BUILD_NUMBER=$((BASE + GITHUB_RUN_NUMBER))
+          echo "versionCode = $BUILD_NUMBER (base $BASE + run $GITHUB_RUN_NUMBER)"
           flutter build apk --release \
-            --build-number=${{ github.run_number }}
+            --build-number=$BUILD_NUMBER
 
       - name: Upload APKs as artifact
         uses: actions/upload-artifact@v4

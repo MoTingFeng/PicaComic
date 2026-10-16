@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `MAJOR.MINOR.PATCH` | 语义化版本主体 | **发版时手改**（`pubspec.yaml`）|
 | `-mod` | 标明这是修改版（非上游原版）| 固定保留 |
-| `+build` | versionCode | **CI 自动覆盖**为构建序号，不用手改 |
+| `+build` | versionCode 的**基数** | 一般不动；CI 用 `基数 + 构建号` 生成实际 versionCode，必须大于历史上发布过的任何 versionCode |
 
 应用内「设置 → 应用信息」里显示的版本名 = `MAJOR.MINOR.PATCH-mod`。
 
@@ -30,9 +30,9 @@
 
 1. 按上表判断该 + 哪一位，改 `pubspec.yaml`：
    ```yaml
-   version: 4.4.0-mod+4211
+   version: 4.4.1-mod+4211
    ```
-   （`+` 后的数字随意，构建时会被 CI 覆盖成构建序号）
+   （`+` 后是 versionCode 的基数，正常不用改；CI 实际用 `基数 + 构建号`，versionCode 持续递增。只有换签名/包名需要重新起算时才抬高它）
 2. 如需更新发版说明，改 `.github/release_notes.md`（构建时自动带构建号与源码 commit）
 3. 提交并推送 `master`
 4. GitHub Actions 自动构建 → 发布到固定 Release tag **`apk-build`**
@@ -45,7 +45,8 @@
 | 4.2.11 | 上游 Pacalini/PicaComic 基线 |
 | 4.3.0-mod | 长按封面直接下载；多选批量下载 + 进度面板（话数/页数/逐话明细/重试失败项）；下载页长按「继续下载 / 重新下载」；合并上游一二档修复；独立包名 `com.github.mo.pica_comic` 与原版共存 |
 | 4.3.1-mod | 修复：源站返回空图片时不再当成下载成功。此前会导致下载页显示「已完成」、点进去却缺页 |
-| **4.4.0-mod** | 自定义漫画源更新检查（启动自动检查 + 手动「检查更新」），源清单指向自维护仓库 `MoTingFeng/pica-sources`；拷贝漫画源修复（`CopyManga` 未定义报错 + 多域名自动探测回退） |
+| 4.4.0-mod | 自定义漫画源更新检查（启动自动检查 + 手动「检查更新」），源清单指向自维护仓库 `MoTingFeng/pica-sources`；拷贝漫画源修复（`CopyManga` 未定义报错 + 多域名自动探测回退） |
+| **4.4.1-mod** | 修复 CI 生成的 versionCode 从 4211 掉成构建序号（1、2、3…），新包被系统判定为降级、无法覆盖安装 |
 
 ## 相关文件
 
