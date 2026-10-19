@@ -295,11 +295,16 @@ class DownloadManager with _DownloadDb implements Listenable {
 
   ///分话下载的任务每下完一话调用一次: 立刻把这本书写进「已下载」列表,
   ///这样用户不必等整本下完就能看到它、并阅读已经下完的话。
+  ///
+  ///[refresh] 是否让「已下载」页面立刻刷新 —— 只在第一话写入时为 true,
+  ///后面每话都刷会让用户正在看的列表反复跳动。
   Future<void> addPartiallyDownloaded(
-      DownloadedItem item, String directory) async {
+      DownloadedItem item, String directory, {bool refresh = true}) async {
     _addToDb(item, directory);
     await _saveInfo();
-    StateController.findOrNull<DownloadPageLogic>()?.refresh();
+    if (refresh) {
+      StateController.findOrNull<DownloadPageLogic>()?.refresh();
+    }
   }
 
   /// 历史完成回调。

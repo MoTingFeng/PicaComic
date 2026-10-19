@@ -80,6 +80,24 @@ jobs:
           flutter build apk --release \
             --build-number=$BUILD_NUMBER
 
+      - name: Rename APKs with version
+        run: |
+          # 产物文件名带上版本名与构建号, 下载到手机后可直接区分新旧包
+          VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//; s/+.*//')"
+          SUFFIX="-${VERSION}-build${GITHUB_RUN_NUMBER}"
+          echo "文件名后缀: ${SUFFIX}.apk"
+          for dir in build/app/outputs/flutter-apk build/app/outputs/apk/release; do
+            [ -d "$dir" ] || continue
+            for f in "$dir"/*.apk; do
+              [ -e "$f" ] || continue
+              case "$f" in
+                *"${SUFFIX}.apk") continue ;;
+              esac
+              mv "$f" "${f%.apk}${SUFFIX}.apk"
+            done
+          done
+          ls -l build/app/outputs/flutter-apk/ build/app/outputs/apk/release/ 2>/dev/null || true
+
       - name: Upload APKs as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -122,6 +140,21 @@ jobs:
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
                  --title "PicaComic Mod" --notes "pending"
+
+          # APK 文件名带版本号后, --clobber 不再覆盖旧文件, 旧包会一直堆积;
+          # 这里只保留本次构建的三个包, 其余 apk 删掉。
+          KEEP="${VERSION}-build${BUILD_NO}.apk"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' 2>/dev/null | while read -r name; do
+              [ -n "$name" ] || continue
+              case "$name" in
+                *"$KEEP") ;;
+                *.apk)
+                  echo "删除旧产物: $name"
+                  gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes ;;
+                *) ;;
+              esac
+            done
 
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "PicaComic Mod ${VERSION} (build ${BUILD_NO})" \

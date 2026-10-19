@@ -204,26 +204,29 @@ class CustomDownloadingItem extends DownloadingItem {
   /// 已经写进「已下载」列表的话数, 避免同一话重复写库
   int _syncedEps = 0;
 
+  /// 已统计过体积的话数 与 累计体积(MB)。
+  /// 下载中要显示真实体积, 又不能每话都全量扫整本目录(话越多越慢),
+  /// 所以只统计新增的话并累加。
+  int _sizedEps = 0;
+  double _knownSize = 0;
+
   /// [eps] 本次算作「已下载」的话(0-based 话序号)。
   /// 整本下完时传全部 _downloadEps; 中途同步只传已下完的那部分 ——
   /// 否则没下的话也会被标成可读, 点进去会找不到文件。
-  /// [full] 为 false 时不做目录体积统计: 该操作要遍历整本目录,
-  /// 每话都算一次会随话数越来越慢。
+  /// [size] 直接给定体积(MB); 不传则全量扫目录(整本下完时用)。
   Future<CustomDownloadedItem> _buildDownloadedItem(List<int> eps,
-      {bool full = true}) async {
+      {double? size}) async {
     var previous = <int>[];
-    double? previousSize;
     if (DownloadManager().isExists(id)) {
       var comic = await DownloadManager().getComicOrNull(id);
       previous = comic!.downloadedEps;
-      previousSize = comic.comicSize;
     }
     var downloaded = (eps + previous).toSet().toList();
     downloaded.sort();
     var tags = <String>[];
     comic.tags.forEach((key, value) => tags.addAll(value));
     return CustomDownloadedItem(
-      full ? await getFolderSize(Directory(path)) : (previousSize ?? 0),
+      size ?? await getFolderSize(Directory(path)),
       downloaded,
       comic.chapters,
       id,
@@ -241,10 +244,25 @@ class CustomDownloadingItem extends DownloadingItem {
   Future<void> onEpisodeDownloaded() async {
     if (directory == null) return;
     var done = _downloadEps.take(downloadingEp).toList();
-    if (done.isEmpty || done.length == _syncedEps) return;
+    if (done.isEmpty) return;
+
+    /// 只扫这一话新增的目录并累加, 让「已下载」里显示的是真实体积而不是 0.00MB
+    for (var i = _sizedEps; i < done.length; i++) {
+      var epDir = Directory("$path/${done[i] + 1}");
+      if (epDir.existsSync()) {
+        _knownSize += await getFolderSize(epDir);
+      }
+    }
+    _sizedEps = done.length;
+
+    if (done.length == _syncedEps) return;
+    /// 「已下载」区域只在第一话下完时刷一次, 后面各话只更新数据库不刷页面,
+    /// 免得用户正在看的列表反复跳动(整本下完时 onTaskFinished 会再刷一次)。
+    var firstEpisode = _syncedEps == 0;
     _syncedEps = done.length;
     DownloadManager().addPartiallyDownloaded(
-        await _buildDownloadedItem(done, full: false), directory!);
+        await _buildDownloadedItem(done, size: _knownSize), directory!,
+        refresh: firstEpisode);
   }
 
   @override
