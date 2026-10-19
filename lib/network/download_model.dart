@@ -76,7 +76,10 @@ typedef DownloadProgressCallback = void Function();
 typedef DownloadProgressCallbackAsync = Future<void> Function();
 
 abstract class DownloadingItem with _TransferSpeedMixin {
-  ///完成时调用
+  ///完成时调用。
+  ///
+  /// 已由 [notifyDownloadFinished] 取代 —— 这个回调没有参数, 并发下载时
+  /// DownloadManager 分辨不出是哪个任务结束了。保留字段只为不改构造签名。
   final DownloadProgressCallback? onFinish;
 
   ///出现错误时调用
@@ -90,6 +93,10 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   ///类型
   DownloadType type;
+
+  /// 任务所属的漫画源标识。并发调度按它分组: 同源串行、不同源并行。
+  /// 内置源按类型区分; JS 源(都是 other)各自覆写为真实的 sourceKey。
+  String get sourceKey => type.name;
 
   /// run function start will cause this increasing by 1
   ///
@@ -121,6 +128,12 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   /// all image urls
   Map<int, List<String>>? links;
+
+  /// 「获取图片信息」阶段(逐话取图片列表)的进度: 已完成话数 / 本次总话数。
+  /// 只有分话下载的源会填; 保持 null 时界面按原来的单一文案显示。
+  int? linkDone;
+
+  int? linkTotal;
 
   int get allowedLoadingNumber => int.tryParse(appdata.settings[79]) ?? 6;
 
@@ -253,12 +266,14 @@ abstract class DownloadingItem with _TransferSpeedMixin {
         if (currentKey != _runtimeKey) return;
         index = 0;
         _downloadingEp++;
+        /// 让「已下载」列表立刻能看到这本书, 不必等整本下完
+        await onEpisodeDownloaded();
         await updateInfo?.call();
       }
 
       // finish downloading
-      if (DownloadManager().downloading.firstOrNull != this) return;
-      onFinish?.call();
+      if (!DownloadManager().isActive(this)) return;
+      notifyDownloadFinished();
       _stopAllTasks();
     } catch (e, s) {
       if (currentKey != _runtimeKey) return;
@@ -403,6 +418,16 @@ abstract class DownloadingItem with _TransferSpeedMixin {
   int get hashCode => id.hashCode;
 
   FutureOr<DownloadedItem> toDownloadedItem();
+
+  /// 分话下载的任务每下完一话调用一次, 用于把当前进度同步进「已下载」列表。
+  /// 默认空实现: 只有支持部分下载的源(如 JS 源)才需要覆写。
+  Future<void> onEpisodeDownloaded() async {}
+
+  /// 完成下载时调用, 让 DownloadManager 收尾(移出队列、释放源槽、安排下一个)。
+  /// 带上自身: 并发下载时完成的未必是队首。
+  void notifyDownloadFinished() {
+    DownloadManager().onTaskFinished(this);
+  }
 
   @override
   String toString() {

@@ -85,10 +85,7 @@ class FavoriteDownloading extends DownloadingItem{
       onError?.call();
       return;
     }
-    pause();
-    DownloadManager().downloading.removeFirst();
-    DownloadManager().downloading.addFirst(downloadLogic);
-    downloadLogic.start();
+    DownloadManager().replaceTask(this, downloadLogic);
   }
 
   @override

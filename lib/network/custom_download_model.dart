@@ -99,6 +99,11 @@ class CustomDownloadingItem extends DownloadingItem {
 
   late final ComicSource source;
 
+  /// JS 源都属于 DownloadType.other, 并发调度必须按真实的源 key 分组,
+  /// 否则再漫画和拷贝漫画会被当成同一个源而互相排队
+  @override
+  String get sourceKey => comic.sourceKey;
+
   @override
   String get cover => comic.cover;
 
@@ -145,6 +150,11 @@ class CustomDownloadingItem extends DownloadingItem {
   Future<Map<int, List<String>>> getLinks() async {
     var links = <int, List<String>>{};
     if (comic.chapters != null) {
+      /// 这个阶段要逐话请求图片列表, 话多时可能持续几十秒(每话之间还有
+      /// 200ms 节流)。不报进度的话界面会一直停在「获取图片信息...」,
+      /// 看起来像卡死, 所以每完成一批就记录进度并通知界面刷新。
+      linkTotal = _downloadEps.length;
+      linkDone = 0;
       var futures = <Future>[];
       for (var i in _downloadEps) {
         futures.add(getOneEp(i, links));
@@ -152,9 +162,13 @@ class CustomDownloadingItem extends DownloadingItem {
         if (futures.length % 5 == 0) {
           await Future.wait(futures);
           futures.clear();
+          linkDone = links.length;
+          updateInfo?.call();
         }
       }
       await Future.wait(futures);
+      linkDone = links.length;
+      updateInfo?.call();
     } else {
       var res = await source.loadComicPages!(comic.comicId, null);
       links[0] = res.data;
@@ -185,18 +199,31 @@ class CustomDownloadingItem extends DownloadingItem {
   }
 
   @override
-  Future<DownloadedItem> toDownloadedItem() async {
+  Future<DownloadedItem> toDownloadedItem() => _buildDownloadedItem(_downloadEps);
+
+  /// 已经写进「已下载」列表的话数, 避免同一话重复写库
+  int _syncedEps = 0;
+
+  /// [eps] 本次算作「已下载」的话(0-based 话序号)。
+  /// 整本下完时传全部 _downloadEps; 中途同步只传已下完的那部分 ——
+  /// 否则没下的话也会被标成可读, 点进去会找不到文件。
+  /// [full] 为 false 时不做目录体积统计: 该操作要遍历整本目录,
+  /// 每话都算一次会随话数越来越慢。
+  Future<CustomDownloadedItem> _buildDownloadedItem(List<int> eps,
+      {bool full = true}) async {
     var previous = <int>[];
+    double? previousSize;
     if (DownloadManager().isExists(id)) {
       var comic = await DownloadManager().getComicOrNull(id);
       previous = comic!.downloadedEps;
+      previousSize = comic.comicSize;
     }
-    var downloaded = (_downloadEps + previous).toSet().toList();
+    var downloaded = (eps + previous).toSet().toList();
     downloaded.sort();
     var tags = <String>[];
     comic.tags.forEach((key, value) => tags.addAll(value));
     return CustomDownloadedItem(
-      await getFolderSize(Directory(path)),
+      full ? await getFolderSize(Directory(path)) : (previousSize ?? 0),
       downloaded,
       comic.chapters,
       id,
@@ -208,6 +235,16 @@ class CustomDownloadingItem extends DownloadingItem {
       comic.cover,
       comic.comicId,
     );
+  }
+
+  @override
+  Future<void> onEpisodeDownloaded() async {
+    if (directory == null) return;
+    var done = _downloadEps.take(downloadingEp).toList();
+    if (done.isEmpty || done.length == _syncedEps) return;
+    _syncedEps = done.length;
+    DownloadManager().addPartiallyDownloaded(
+        await _buildDownloadedItem(done, full: false), directory!);
   }
 
   @override

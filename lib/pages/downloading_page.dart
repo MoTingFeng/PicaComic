@@ -36,29 +36,31 @@ class _DownloadingPageState extends State<DownloadingPage> {
       setState(() {});
     } else if (downloadManager.downloading.length != comics.length) {
       rebuild();
-    } else if (key.currentState != null){
-      key.currentState!.updateUi();
+    } else {
+      /// 并发下载时每个任务都要刷自己的进度, 不能只刷队首那一个
+      for (var k in _tileKeys.values.toList()) {
+        k.currentState?.updateUi();
+      }
     }
   }
 
   void rebuild() {
-    key = GlobalKey<_DownloadingTileState>();
     setState(() {
       comics = List.from(downloadManager.downloading);
     });
+    _tileKeys.removeWhere((id, _) => !comics.any((e) => e.id == id));
   }
 
-  var key = GlobalKey<_DownloadingTileState>();
+  /// 每个任务一个稳定的 key, 让所有任务的进度都能各自刷新
+  final _tileKeys = <String, GlobalKey<_DownloadingTileState>>{};
+
+  GlobalKey<_DownloadingTileState> _keyFor(String id) =>
+      _tileKeys.putIfAbsent(id, () => GlobalKey<_DownloadingTileState>());
 
   @override
   Widget build(BuildContext context) {
     var widgets = <Widget>[];
     for (var i in comics) {
-      var key = Key(i.id);
-      if(i == comics.first) {
-        key = this.key;
-      }
-
       widgets.add(_DownloadingTile(
         comic: i,
         cancel: () {
@@ -69,7 +71,7 @@ class _DownloadingPageState extends State<DownloadingPage> {
           });
         },
         onComicPositionChange: rebuild,
-        key: key,
+        key: _keyFor(i.id),
       ));
     }
 
@@ -196,11 +198,10 @@ class _DownloadingTileState extends State<_DownloadingTile> {
   }
 
   void updateStatistic() {
-    final firstItem = DownloadManager().downloading.firstOrNull;
-    if (firstItem == null || comic != firstItem) {
+    /// 并发下载时同时活动的任务不止一个, 所以按「是不是本源的活动任务」判断
+    if (!DownloadManager().isActive(comic)) {
       return;
     }
-    comic = firstItem;
     speed = comic.currentSpeed;
     downloadPages = comic.downloadedPages;
     pagesCount = comic.totalPages;
@@ -308,7 +309,12 @@ class _DownloadingTileState extends State<_DownloadingTile> {
 
   String getProgressText() {
     if (pagesCount == null) {
-      if (comic == DownloadManager().downloading.first) {
+      if (DownloadManager().isActive(comic)) {
+        var total = comic.linkTotal;
+        if (total != null && total > 0) {
+          /// 显示已取到图片列表的话数, 否则话多时这一步看起来像卡死
+          return "${"获取图片信息...".tl} ${comic.linkDone ?? 0}/$total";
+        }
         return "获取图片信息...".tl;
       } else {
         return "";

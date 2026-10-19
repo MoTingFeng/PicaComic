@@ -227,15 +227,61 @@ class DownloadManager with _DownloadDb implements Listenable {
     await file.writeAsString(const JsonEncoder().convert(data));
   }
 
+  /// 每个漫画源当前正在下载的任务: sourceKey -> 任务 id。
+  /// 同一个源同时只跑一个任务(避免同源并发被风控), 不同源之间并行。
+  final Map<String, String> _activeTasks = {};
+
+  /// 该任务是否是它所在源当前的活动任务
+  bool isActive(DownloadingItem item) => _activeTasks[item.sourceKey] == item.id;
+
+  /// 启动任务并占住它所在源的槽
+  void _startTask(DownloadingItem item) {
+    _activeTasks[item.sourceKey] = item.id;
+    item.start();
+  }
+
+  /// 该任务所在源空闲时才启动它
+  void _startIfIdle(DownloadingItem item) {
+    if (_activeTasks.containsKey(item.sourceKey)) return;
+    _startTask(item);
+  }
+
+  /// 释放任务占用的源槽
+  void _releaseTask(DownloadingItem item) {
+    if (_activeTasks[item.sourceKey] == item.id) {
+      _activeTasks.remove(item.sourceKey);
+    }
+  }
+
+  /// 给每个空闲的源各启动一个任务(按队列顺序, 同源只取最早的那个)。
+  /// 先全部占槽再逐个启动: start() 内部可能改动队列, 不能在遍历中直接调。
+  void _startIdleTasks() {
+    var pending = <DownloadingItem>[];
+    for (var item in downloading) {
+      if (_activeTasks.containsKey(item.sourceKey)) continue;
+      _activeTasks[item.sourceKey] = item.id;
+      pending.add(item);
+    }
+    for (var item in pending) {
+      item.start();
+    }
+  }
+
   /// move comic to first
+  ///
+  /// 并发下载时不再为此暂停其它源的任务, 只保证该源的下一个名额归它。
   void moveToFirst(DownloadingItem item) {
     if (downloading.first == item) {
       return;
     }
-    pause();
     downloading.remove(item);
     downloading.addFirst(item);
-    start();
+    if (!isActive(item)) {
+      //置顶视为继续下载: 暂停状态下也能靠它把本源跑起来
+      isDownloading = true;
+      _startIfIdle(item);
+    }
+    notifyListeners();
   }
 
   String generateId(String source, String id) {
@@ -247,26 +293,59 @@ class DownloadManager with _DownloadDb implements Listenable {
     return id;
   }
 
-  ///当一个下载任务完成时, 调用此函数
-  void _onFinish() async {
-    var task = downloading.removeFirst();
+  ///分话下载的任务每下完一话调用一次: 立刻把这本书写进「已下载」列表,
+  ///这样用户不必等整本下完就能看到它、并阅读已经下完的话。
+  Future<void> addPartiallyDownloaded(
+      DownloadedItem item, String directory) async {
+    _addToDb(item, directory);
+    await _saveInfo();
+    StateController.findOrNull<DownloadPageLogic>()?.refresh();
+  }
+
+  /// 历史完成回调。
+  ///
+  /// 完成通知已由 [onTaskFinished] 接管 —— 那个版本带着任务身份, 并发下载时
+  /// 才能知道是哪一本下完了。这里保留空实现, 只为不改动各源的构造签名。
+  void _onFinish() {}
+
+  /// 当一个下载任务完成时, 由 DownloadingItem.notifyDownloadFinished() 调用。
+  /// 必须带上任务本身: 并发下载时完成的未必是队首。
+  Future<void> onTaskFinished(DownloadingItem task) async {
+    downloading.remove(task);
+    _releaseTask(task);
     _addToDb(await task.toDownloadedItem(), task.directory!);
     await _saveInfo();
     StateController.findOrNull<DownloadPageLogic>()?.refresh();
-    if (downloading.isNotEmpty) {
-      //清除已完成的任务, 开始下一个任务
-      downloading.first.start();
-    } else {
+    //清除已完成的任务, 给空闲的源安排下一个任务
+    _startIdleTasks();
+    if (_activeTasks.isEmpty) {
       //标记状态为未在下载
       isDownloading = false;
       notifications.endProgress();
     }
   }
 
-  ///暂停下载
+  /// 用解析完成的真实任务替换占位任务(见 FavoriteDownloading):
+  /// 占位任务本身不下载图片, 只是先解析出真实的下载任务。
+  void replaceTask(DownloadingItem old, DownloadingItem replacement) {
+    downloading.remove(old);
+    _releaseTask(old);
+    if (!downloading.any((e) => e.id == replacement.id)) {
+      downloading.addFirst(replacement);
+    }
+    isDownloading = true;
+    _startIfIdle(replacement);
+    notifyListeners();
+    _saveInfo();
+  }
+
+  ///暂停下载(所有源的活动任务)
   void pause() {
     isDownloading = false;
-    downloading.first.pause();
+    for (var id in _activeTasks.values.toList()) {
+      downloading.firstWhereOrNull((e) => e.id == id)?.pause();
+    }
+    _activeTasks.clear();
   }
 
   ///出现错误时调用此函数
@@ -280,26 +359,18 @@ class DownloadManager with _DownloadDb implements Listenable {
   ///开始或继续下载
   void start() {
     _error = false;
-    if (isDownloading) return;
-    downloading.first.start();
     isDownloading = true;
+    _startIdleTasks();
   }
 
   ///取消指定的下载
   void cancel(String id) {
-    var index = 0;
-    for (var i in downloading) {
-      if (i.id == id) break;
-      index++;
-    }
+    var item = downloading.firstWhereOrNull((e) => e.id == id);
+    if (item == null) return;
 
-    if (index == 0) {
-      _error = false;
-      downloading.first.stop();
-      downloading.removeFirst();
-    } else {
-      downloading.removeWhere((element) => element.id == id);
-    }
+    item.stop();
+    downloading.remove(item);
+    _releaseTask(item);
 
     notifyListeners();
 
@@ -307,7 +378,7 @@ class DownloadManager with _DownloadDb implements Listenable {
       isDownloading = false;
       notifications.endProgress();
     } else {
-      downloading.first.start();
+      _startIdleTasks();
     }
     _saveInfo();
   }
@@ -516,10 +587,9 @@ extension AddDownloadExt on DownloadManager {
     }
     downloading.addLast(item);
     _saveInfo();
-    if (!isDownloading) {
-      downloading.first.start();
-      isDownloading = true;
-    }
+    isDownloading = true;
+    //该源空闲时才真的开跑: 同源仍按队列串行, 不同源并行
+    _startIfIdle(item);
   }
 
   ///添加哔咔漫画下载

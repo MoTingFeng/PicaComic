@@ -200,7 +200,7 @@ class EhDownloadingItem extends DownloadingItem{
               _currentSpeed = speed;
               updateInfo?.call();
               if(current == total){
-                if (DownloadManager().downloading.firstOrNull != this) return;
+                if (!DownloadManager().isActive(this)) return;
                 finish();
               }
             },
@@ -218,7 +218,7 @@ class EhDownloadingItem extends DownloadingItem{
 
   void finish() async {
     try {
-      onFinish?.call();
+      notifyDownloadFinished();
     } catch (e, s) {
       log("Download finish error: $e\n$s", "Download", LogLevel.error);
       onError?.call();
