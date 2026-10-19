@@ -51,6 +51,18 @@
 | 4.5.0-mod | 漫画源浏览列表改为自维护仓库 `MoTingFeng/pica-sources`（上游 `wgh136/pica_configs` 已停更）；列表条目支持 `url` 字段 |
 | **4.6.0-mod** | 下载调度改为「按漫画源并发」（同源仍串行排队）；分话下载每下完一话即出现在「已下载」并可立即阅读；下载页「获取图片信息」阶段显示已取到的话数 `x/n`；修复下载中条目的体积显示为 0.00MB |
 
+## Release 管理约定
+
+- **一个版本一个 Release**，tag 用 `v<版本名>`（如 `v4.6.0-mod`）。同一个版本重复构建会追加到同一个 Release，靠文件名里的构建号区分。
+- **正式版全部保留**：public 仓库的 Release 产物不收存储与流量费用，历史版本留着方便回退。
+- **`Latest` 由 GitHub 按发布时间自动标记，不是按版本号排序**。若给旧版本补发产物，它会被标成 Latest，需要手动纠正：
+  `gh release edit <tag> --latest=false`。
+- **产物命名**：`app-<架构>-release-<版本名>-build<构建号>.apk`，另附 `SHA256SUMS` 校验文件（下载后可 `sha256sum -c SHA256SUMS` 验证完整性）。
+- **Release 说明**：每次只贴当前版本那一段（`.github/release_notes.md` 里按 `### <版本名>` 分段），加上 `.github/install_notes.md` 的通用安装说明。
+- **滚动型产物**（如历史遗留的 `apk-build`）不再更新，标题标注「历史归档」；日后若需要 nightly/滚动构建，应使用独立 tag，不与正式版混在同一页。
+- **预发布**：要发测试版时版本号带后缀并勾选 pre-release，不要占用 `Latest`。
+- **实验性产物**走独立分支与独立 tag，不进正式 Release。
+
 ## 相关文件
 
 | 文件 | 作用 |
