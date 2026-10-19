@@ -141,21 +141,6 @@ jobs:
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
                  --title "PicaComic Mod" --notes "pending"
 
-          # APK 文件名带版本号后, --clobber 不再覆盖旧文件, 旧包会一直堆积;
-          # 这里只保留本次构建的三个包, 其余 apk 删掉。
-          KEEP="${VERSION}-build${BUILD_NO}.apk"
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[].name' 2>/dev/null | while read -r name; do
-              [ -n "$name" ] || continue
-              case "$name" in
-                *"$KEEP") ;;
-                *.apk)
-                  echo "删除旧产物: $name"
-                  gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes ;;
-                *) ;;
-              esac
-            done
-
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "PicaComic Mod ${VERSION} (build ${BUILD_NO})" \
             --notes-file "$NOTES"
