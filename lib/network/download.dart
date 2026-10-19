@@ -215,16 +215,49 @@ class DownloadManager with _DownloadDb implements Listenable {
     await _initDb();
   }
 
+  /// 正在进行的落盘, 非 null 表示已有一轮写在跑
+  Future<void>? _saving;
+
+  /// 上一轮写的过程中又来了保存请求, 写完当前这轮要再补一轮
+  bool _saveAgain = false;
+
   ///储存当前的下载队列信息, 每完成一张图片的下载调用一次
+  ///
+  /// newDownload.json 是全量重写, 而本方法会被每张图片的完成回调并发触发
+  /// (多源并行下载时尤其密集)。两次重写交错会把文件写成半截 JSON, 下次启动
+  /// 就读不出来(日志里表现为 Failed to read downloaded information)。
+  /// 所以这里把落盘串行化: 有写在跑就只记一个待写标记, 由那轮写完后补写。
   Future<void> _saveInfo() async {
     notifyListeners();
-    var data = <String, dynamic>{};
-    data["downloading"] = <Map<String, dynamic>>[];
-    for (var item in downloading) {
-      data["downloading"].add(item.toMap());
+    var running = _saving;
+    if (running != null) {
+      _saveAgain = true;
+      return running;
     }
-    var file = File("$path${pathSep}newDownload.json");
-    await file.writeAsString(const JsonEncoder().convert(data));
+    running = _saveInfoLoop();
+    _saving = running;
+    return running;
+  }
+
+  Future<void> _saveInfoLoop() async {
+    try {
+      do {
+        _saveAgain = false;
+        var data = <String, dynamic>{};
+        data["downloading"] = <Map<String, dynamic>>[];
+        for (var item in downloading) {
+          data["downloading"].add(item.toMap());
+        }
+        var file = File("$path${pathSep}newDownload.json");
+        await file.writeAsString(const JsonEncoder().convert(data));
+      } while (_saveAgain);
+    } catch (e, s) {
+      /// 落盘失败不该把调用方(每张图片的完成回调)一起带崩
+      LogManager.addLog(LogLevel.error, "IO",
+          "Failed to save downloaded information\n$e\n$s");
+    } finally {
+      _saving = null;
+    }
   }
 
   /// 每个漫画源当前正在下载的任务: sourceKey -> 任务 id。

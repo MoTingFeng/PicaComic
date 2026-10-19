@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:pica_comic/base.dart';
 import 'package:pica_comic/comic_source/comic_source.dart';
 import 'package:pica_comic/foundation/image_manager.dart';
+import 'package:pica_comic/foundation/log.dart';
 import 'package:pica_comic/network/download_model.dart';
 
 import '../tools/io_tools.dart';
@@ -126,24 +127,41 @@ class CustomDownloadingItem extends DownloadingItem {
         "User-Agent": webUA,
       };
 
+  /// 取不到图片的话(通常是需要购买或更高等级的"卷")。
+  /// 这些话下载时跳过, 不影响其余话, 也不会被标成「已下载」。
+  final List<int> skippedEps = [];
+
   Future<void> getOneEp(int i, Map<int, List<String>> links) async {
     if (links[i + 1] != null) return;
 
-    int retry = 0;
+    var ep = comic.chapters!.keys.elementAt(i);
+    String? lastError;
 
-    while (retry < 3) {
-      try {
-        links[i + 1] = (await source.loadComicPages!(
-                comic.comicId, comic.chapters!.keys.elementAt(i)))
-            .data;
+    for (var retry = 0; retry < 3; retry++) {
+      var res = await source.loadComicPages!(comic.comicId, ep);
+      if (!res.error) {
+        links[i + 1] = res.data;
         return;
-      } catch (e) {
-        await Future.delayed(const Duration(seconds: 3));
-        retry++;
       }
+      /// 记下源给的真实原因(例如"该章节需要登录或更高账号权限"),
+      /// 别再统一成 Failed to get chapters —— 否则日志里看不出问题在哪
+      lastError = res.errorMessage;
+      await Future.delayed(const Duration(seconds: 3));
     }
 
-    throw Exception("Failed to get chapters");
+    throw Exception(lastError ?? "Failed to get chapters");
+  }
+
+  /// 取一话的图片列表, 失败只记账不外抛 —— 否则 Future.wait 会让整本下载失败,
+  /// start() 走 catch 分支反复 retry, 连能下的那几话也一起卡在「获取图片信息」。
+  Future<void> _fetchOneEp(int i, Map<int, List<String>> links) async {
+    try {
+      await getOneEp(i, links);
+    } catch (e) {
+      skippedEps.add(i);
+      LogManager.addLog(
+          LogLevel.warning, "Download", "跳过第 ${i + 1} 话(取不到图片): $e");
+    }
   }
 
   @override
@@ -153,22 +171,30 @@ class CustomDownloadingItem extends DownloadingItem {
       /// 这个阶段要逐话请求图片列表, 话多时可能持续几十秒(每话之间还有
       /// 200ms 节流)。不报进度的话界面会一直停在「获取图片信息...」,
       /// 看起来像卡死, 所以每完成一批就记录进度并通知界面刷新。
+      /// 进度按"已处理的话数"算(含取不到的话), 否则有话说取不到时数字走不完。
       linkTotal = _downloadEps.length;
       linkDone = 0;
+      skippedEps.clear();
+      var handled = 0;
       var futures = <Future>[];
       for (var i in _downloadEps) {
-        futures.add(getOneEp(i, links));
+        futures.add(_fetchOneEp(i, links).whenComplete(() {
+          handled++;
+          linkDone = handled;
+          updateInfo?.call();
+        }));
         await Future.delayed(const Duration(milliseconds: 200));
         if (futures.length % 5 == 0) {
           await Future.wait(futures);
           futures.clear();
-          linkDone = links.length;
           updateInfo?.call();
         }
       }
       await Future.wait(futures);
-      linkDone = links.length;
       updateInfo?.call();
+      if (links.isEmpty && _downloadEps.isNotEmpty) {
+        throw Exception("选中的 ${_downloadEps.length} 话都取不到图片");
+      }
     } else {
       var res = await source.loadComicPages!(comic.comicId, null);
       links[0] = res.data;
@@ -199,7 +225,8 @@ class CustomDownloadingItem extends DownloadingItem {
   }
 
   @override
-  Future<DownloadedItem> toDownloadedItem() => _buildDownloadedItem(_downloadEps);
+  Future<DownloadedItem> toDownloadedItem() => _buildDownloadedItem(
+      _downloadEps.where((e) => !skippedEps.contains(e)).toList());
 
   /// 已经写进「已下载」列表的话数, 避免同一话重复写库
   int _syncedEps = 0;
@@ -243,7 +270,9 @@ class CustomDownloadingItem extends DownloadingItem {
   @override
   Future<void> onEpisodeDownloaded() async {
     if (directory == null) return;
-    var done = _downloadEps.take(downloadingEp).toList();
+    /// links 的 key 是 1-based 话序号, 且只含真的取到图片的话 —— 跳过的话不在里面,
+    /// 所以不能再用 _downloadEps.take() 推断(有跳过时两者会错位)。
+    var done = links!.keys.take(downloadingEp).map((e) => e - 1).toList();
     if (done.isEmpty) return;
 
     /// 只扫这一话新增的目录并累加, 让「已下载」里显示的是真实体积而不是 0.00MB
