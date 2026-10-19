@@ -339,11 +339,20 @@ class DownloadManager with _DownloadDb implements Listenable {
     _saveInfo();
   }
 
+  /// 按 id 在下载队列里找任务。
+  /// 不用 firstWhereOrNull: 那个扩展只对 List 定义, Queue 上用不了。
+  DownloadingItem? _findTask(String id) {
+    for (var item in downloading) {
+      if (item.id == id) return item;
+    }
+    return null;
+  }
+
   ///暂停下载(所有源的活动任务)
   void pause() {
     isDownloading = false;
     for (var id in _activeTasks.values.toList()) {
-      downloading.firstWhereOrNull((e) => e.id == id)?.pause();
+      _findTask(id)?.pause();
     }
     _activeTasks.clear();
   }
@@ -365,7 +374,7 @@ class DownloadManager with _DownloadDb implements Listenable {
 
   ///取消指定的下载
   void cancel(String id) {
-    var item = downloading.firstWhereOrNull((e) => e.id == id);
+    var item = _findTask(id);
     if (item == null) return;
 
     item.stop();
