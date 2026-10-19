@@ -112,20 +112,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          TAG=apk-build
           BUILD_NO="${GITHUB_RUN_NUMBER}"
           SHORT_SHA="$(git rev-parse --short HEAD)"
 
-          # tag 跟随本次构建的源码, 这样 release 页面上显示的 commit 才是对的。
-          # 注意: 不能用 git push 移动 tag —— GITHUB_TOKEN 没有 workflow scope,
-          # 而提交里含 .github/workflows 文件, 推送会被 GitHub 拒绝, 改用 API。
-          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" \
-            -f sha="${GITHUB_SHA}" -F force=true >/dev/null 2>&1 \
-            || echo "move tag ${TAG} skipped"
-
           # 版本名统一从 pubspec.yaml 读取(发版时只改那一处)
           VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//; s/+.*//')"
-          echo "release version: $VERSION"
+          # 每个版本一个 Release: 同版本重复构建追加到同一个 Release, 历史版本互不覆盖
+          TAG="v${VERSION}"
+          echo "release version: $VERSION   tag: $TAG"
+
+          # tag 指向本次构建的源码, 这样 Release 页面上显示的 commit 才是对的。
+          # 用 API 而不是 git push: GITHUB_TOKEN 没有 workflow scope,
+          # 提交里含 .github/workflows 文件时推送会被拒绝。
+          # 先按"移动"处理(同版本重复构建), 失败说明 tag 还不存在, 再创建。
+          gh api --method PATCH "/repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" \
+            -f sha="${GITHUB_SHA}" -F force=true >/dev/null 2>&1 \
+            || gh api --method POST "/repos/${GITHUB_REPOSITORY}/git/refs" \
+                 -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}" >/dev/null 2>&1 \
+            || echo "tag ${TAG} 已存在或创建失败, 继续发布"
 
           # 生成更新说明: 动态头部 + 仓库中维护的说明文件
           NOTES=release_notes.md
@@ -139,7 +143,7 @@ jobs:
 
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-                 --title "PicaComic Mod" --notes "pending"
+                 --title "PicaComic Mod ${VERSION}" --notes "pending"
 
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "PicaComic Mod ${VERSION} (build ${BUILD_NO})" \

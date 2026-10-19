@@ -35,7 +35,8 @@
    （`+` 后是 versionCode 的基数，正常不用改；CI 实际用 `基数 + 构建号`，versionCode 持续递增。只有换签名/包名需要重新起算时才抬高它）
 2. 如需更新发版说明，改 `.github/release_notes.md`（构建时自动带构建号与源码 commit）
 3. 提交并推送 `master`
-4. GitHub Actions 自动构建 → 发布到固定 Release tag **`apk-build`**
+4. GitHub Actions 自动构建 → 发布到**该版本自己的 Release**（tag 形如 **`v4.6.0-mod`**）；
+   同一个版本重复构建会追加到同一个 Release，各历史版本互相独立、不会被覆盖
 5. 手机端**覆盖安装**即可（包名与签名固定，数据保留）
 
 ## 版本代号对照
