@@ -141,7 +141,7 @@ class CustomDownloadingItem extends DownloadingItem {
 
   /// 下载页用"话"显示进度: 后面的地址还没取, 总页数不可知
   @override
-  int? get episodeDone => comic.chapters == null ? null : _downloadingEp;
+  int? get episodeDone => comic.chapters == null ? null : downloadingEp;
 
   @override
   int? get episodeTotal => comic.chapters == null ? null : _downloadEps.length;
@@ -222,7 +222,7 @@ class CustomDownloadingItem extends DownloadingItem {
     linkTotal = _downloadEps.length;
     linkDone = 0;
     skippedEps.clear();
-    if (_downloadingEp > 0) {
+    if (downloadingEp > 0) {
       return {};
     }
     var result = <int, List<String>>{};
