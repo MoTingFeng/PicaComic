@@ -554,6 +554,13 @@ class ComicInfoData with HistoryMixin {
 typedef CategoryComicsLoader = Future<Res<List<BaseComic>>> Function(
     String category, String? param, List<String> options, int page);
 
+/// 多维度筛选: [groupParams] 为「分组标题 -> 该组选中的参数」,
+/// 例如 {"题材": "4", "读者群": "3262", "地域": "0"}。
+/// 分组标题来自 [CategoryData.categories] 里各 part 的 title。
+/// 值为 null 表示该组未选(等同「全部」)。
+typedef CategoryComicsMultiLoader = Future<Res<List<BaseComic>>> Function(
+    Map<String, String?> groupParams, List<String> options, int page);
+
 class CategoryComicsData {
   /// options
   final List<CategoryComicsOptions> options;
@@ -565,14 +572,23 @@ class CategoryComicsData {
   /// [Res.subData] should be maxPage or null if there is no limit.
   final CategoryComicsLoader load;
 
+  /// 源可选实现的多维度筛选加载器。
+  ///
+  /// 不为 null 时, 分类列表页会把其它分组也渲染成可选项, 并把所有分组的当前选中值
+  /// 一次性传进来(见 [CategoryComicsMultiLoader]); 为 null 则保持旧行为: 只能带
+  /// 一个分组的参数 + [options]。
+  final CategoryComicsMultiLoader? loadMulti;
+
   final RankingData? rankingData;
 
-  const CategoryComicsData(this.options, this.load, {this.rankingData});
+  const CategoryComicsData(this.options, this.load,
+      {this.rankingData, this.loadMulti});
 
   const CategoryComicsData.named({
     this.options = const [],
     required this.load,
     this.rankingData,
+    this.loadMulti,
   });
 }
 

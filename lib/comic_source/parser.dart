@@ -315,7 +315,8 @@ class ComicSourceParser {
         }
       });
     }
-    return CategoryComicsData(options, (category, param, options, page) async {
+    Future<Res<List<BaseComic>>> loader(
+        String category, String? param, List<String> options, int page) async {
       try {
         var res = await JsEngine().runCode("""
           ComicSource.sources.$_key.categoryComics.load(
@@ -333,7 +334,34 @@ class ComicSourceParser {
         log("$e\n$s", "Network", LogLevel.error);
         return Res.error(e.toString());
       }
-    }, rankingData: rankingData);
+    }
+
+    /// 源可选实现 categoryComics.loadMulti(多维度筛选): 分类列表页会把其它分组
+    /// 的选项也展示出来, 并把所有分组当前选中的参数一次传进来。
+    CategoryComicsMultiLoader? multiLoader;
+    if (_checkExists("categoryComics.loadMulti")) {
+      multiLoader = (groupParams, options, page) async {
+        try {
+          var res = await JsEngine().runCode("""
+            ComicSource.sources.$_key.categoryComics.loadMulti(
+              ${jsonEncode(groupParams)},
+              ${jsonEncode(options)},
+              ${jsonEncode(page)}
+            )
+          """);
+          return Res(
+              List.generate(res["comics"].length,
+                      (index) => CustomComic.fromJson(res["comics"][index], _key!)),
+              subData: res["maxPage"]);
+        } catch (e, s) {
+          log("$e\n$s", "Network", LogLevel.error);
+          return Res.error(e.toString());
+        }
+      };
+    }
+
+    return CategoryComicsData(options, loader,
+        rankingData: rankingData, loadMulti: multiLoader);
   }
 
   SearchPageData? _loadSearchData() {
