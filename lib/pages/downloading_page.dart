@@ -208,8 +208,12 @@ class _DownloadingTileState extends State<_DownloadingTile> {
     if (pagesCount == 0) {
       pagesCount = null;
     }
-    if (pagesCount != null && pagesCount! > 0) {
-      value = downloadPages / pagesCount!;
+    /// 地址是边下边取的任务总页数不可知, 用"话"算进度, 否则会超过 100%
+    var epsTotal = comic.episodeTotal;
+    if (epsTotal != null && epsTotal > 0) {
+      value = ((comic.episodeDone ?? 0) / epsTotal).clamp(0.0, 1.0).toDouble();
+    } else if (pagesCount != null && pagesCount! > 0) {
+      value = (downloadPages / pagesCount!).clamp(0.0, 1.0).toDouble();
     }
   }
 
@@ -327,6 +331,12 @@ class _DownloadingTileState extends State<_DownloadingTile> {
     }
 
     String status = "${"已下载".tl}$downloadPages/$pagesCount";
+
+    /// 边下边取地址的任务按"话"报进度(页数分母不可知)
+    var epsTotal = comic.episodeTotal;
+    if (epsTotal != null && epsTotal > 0) {
+      status = "${"已下载".tl}${comic.episodeDone ?? 0}/$epsTotal ${"话".tl}";
+    }
 
     if (comic is EhDownloadingItem
         && (comic as EhDownloadingItem).downloadType != 0) {

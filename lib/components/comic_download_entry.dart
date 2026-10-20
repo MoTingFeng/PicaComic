@@ -612,7 +612,7 @@ class _BatchDownloadPanelState extends State<_BatchDownloadPanel> {
                       SizedBox(
                         width: 64,
                         child: LinearProgressIndicator(
-                          value: progress.done / progress.total,
+                          value: (progress.done / progress.total).clamp(0.0, 1.0).toDouble(),
                           minHeight: 4,
                         ),
                       ),

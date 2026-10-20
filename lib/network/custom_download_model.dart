@@ -113,9 +113,13 @@ class CustomDownloadingItem extends DownloadingItem {
 
   Stream<DownloadProgress> _getImage(String url) {
     if (source.getImageLoadingConfig != null) {
-      int ep = links!.keys.elementAt(downloadingEp);
-      var config = source.getImageLoadingConfig!(url, comic.comicId,
-          comic.chapters?.keys.elementAtOrNull(ep - 1) ?? comic.comicId);
+      /// 用 "本次下到第几话" 直接取话序号。不能再用 links.keys.elementAt():
+      /// 懒加载/地址重取之后 links 里未必留着前面几话, 按下标取会取错话。
+      var epIndex = _downloadEps.elementAtOrNull(downloadingEp);
+      var chapterId = epIndex == null
+          ? comic.comicId
+          : (comic.chapters?.keys.elementAtOrNull(epIndex) ?? comic.comicId);
+      var config = source.getImageLoadingConfig!(url, comic.comicId, chapterId);
       return ImageManager()
           .getImage(config["url"] ?? url, Map.from(config['headers'] ?? {}));
     }
@@ -130,6 +134,17 @@ class CustomDownloadingItem extends DownloadingItem {
   /// 取不到图片的话(通常是需要购买或更高等级的"卷")。
   /// 这些话下载时跳过, 不影响其余话, 也不会被标成「已下载」。
   final List<int> skippedEps = [];
+
+  /// 本次要下的话数(懒加载靠它决定循环到哪)
+  @override
+  int get totalEps => comic.chapters == null ? 1 : _downloadEps.length;
+
+  /// 下载页用"话"显示进度: 后面的地址还没取, 总页数不可知
+  @override
+  int? get episodeDone => comic.chapters == null ? null : _downloadingEp;
+
+  @override
+  int? get episodeTotal => comic.chapters == null ? null : _downloadEps.length;
 
   Future<void> getOneEp(int i, Map<int, List<String>> links) async {
     if (links[i + 1] != null) return;
@@ -146,60 +161,81 @@ class CustomDownloadingItem extends DownloadingItem {
       /// 记下源给的真实原因(例如"该章节需要登录或更高账号权限"),
       /// 别再统一成 Failed to get chapters —— 否则日志里看不出问题在哪
       lastError = res.errorMessage;
+      /// 这类是确定性失败(需购买/已删除), 重试只是白等
+      if (lastError != null &&
+          (lastError.contains("不可阅读") ||
+              lastError.contains("不存在") ||
+              lastError.contains("已删除"))) {
+        break;
+      }
       await Future.delayed(const Duration(seconds: 3));
     }
 
     throw Exception(lastError ?? "Failed to get chapters");
   }
 
-  /// 取一话的图片列表, 失败只记账不外抛 —— 否则 Future.wait 会让整本下载失败,
+  /// 取一话的图片列表, 失败只记账不外抛 —— 否则整本下载会失败,
   /// start() 走 catch 分支反复 retry, 连能下的那几话也一起卡在「获取图片信息」。
+  /// 取不到的话在 links 里占一个空列表: 主循环会跳过它, 但话的位置不会错位。
   Future<void> _fetchOneEp(int i, Map<int, List<String>> links) async {
+    if (links[i + 1] != null) return;
     try {
       await getOneEp(i, links);
     } catch (e) {
       skippedEps.add(i);
+      links[i + 1] = [];
       LogManager.addLog(
           LogLevel.warning, "Download", "跳过第 ${i + 1} 话(取不到图片): $e");
     }
   }
 
+  /// 懒加载: 只取这一话的图片地址。
+  ///
+  /// 以前是开下载就把全书地址一次取完, 而再漫画的图片地址带签名有效期,
+  /// 隔天继续下载时那批地址早就失效了, 一张都下不动。改成用到哪话取哪话。
+  @override
+  Future<int> ensureEpLinks(int position) async {
+    if (comic.chapters == null) {
+      return super.ensureEpLinks(position);
+    }
+    links ??= <int, List<String>>{};
+    var i = _downloadEps[position];
+    if (links![i + 1] == null) {
+      await _fetchOneEp(i, links!);
+      linkDone = position + 1;
+      linkTotal = _downloadEps.length;
+      updateInfo?.call();
+    }
+    return i + 1;
+  }
+
   @override
   Future<Map<int, List<String>>> getLinks() async {
-    var links = <int, List<String>>{};
-    if (comic.chapters != null) {
-      /// 这个阶段要逐话请求图片列表, 话多时可能持续几十秒(每话之间还有
-      /// 200ms 节流)。不报进度的话界面会一直停在「获取图片信息...」,
-      /// 看起来像卡死, 所以每完成一批就记录进度并通知界面刷新。
-      /// 进度按"已处理的话数"算(含取不到的话), 否则有话说取不到时数字走不完。
-      linkTotal = _downloadEps.length;
-      linkDone = 0;
-      skippedEps.clear();
-      var handled = 0;
-      var futures = <Future>[];
-      for (var i in _downloadEps) {
-        futures.add(_fetchOneEp(i, links).whenComplete(() {
-          handled++;
-          linkDone = handled;
-          updateInfo?.call();
-        }));
-        await Future.delayed(const Duration(milliseconds: 200));
-        if (futures.length % 5 == 0) {
-          await Future.wait(futures);
-          futures.clear();
-          updateInfo?.call();
-        }
+    if (comic.chapters == null || _downloadEps.isEmpty) {
+      if (comic.chapters == null) {
+        return {0: (await source.loadComicPages!(comic.comicId, null)).data};
       }
-      await Future.wait(futures);
-      updateInfo?.call();
-      if (links.isEmpty && _downloadEps.isNotEmpty) {
-        throw Exception("选中的 ${_downloadEps.length} 话都取不到图片");
-      }
-    } else {
-      var res = await source.loadComicPages!(comic.comicId, null);
-      links[0] = res.data;
+      return {};
     }
-    return links;
+    /// 只取第一话, 其余等下载到那一话时再取(见 ensureEpLinks)。
+    /// 断点续传时从当前进度直接开始, 不必回头取第一话。
+    linkTotal = _downloadEps.length;
+    linkDone = 0;
+    skippedEps.clear();
+    if (_downloadingEp > 0) {
+      return {};
+    }
+    var result = <int, List<String>>{};
+    await _fetchOneEp(_downloadEps.first, result);
+    linkDone = 1;
+    updateInfo?.call();
+    /// 只选了一话又取不到图片时直接报错(让用户看到原因);
+    /// 选多话时第一话取不到(常见于排在最前的"卷")只是跳过, 继续下后面的。
+    if (_downloadEps.length == 1 &&
+        (result[_downloadEps.first + 1]?.isEmpty ?? true)) {
+      throw Exception("第 ${_downloadEps.first + 1} 话取不到图片");
+    }
+    return result;
   }
 
   @override
@@ -267,30 +303,41 @@ class CustomDownloadingItem extends DownloadingItem {
     );
   }
 
+  /// 已下完的话(0-based 话序号), 按完成顺序。
+  ///
+  /// 不能再用 "links.keys.take(downloadingEp)" 推断: 懒加载 + 地址失效重取之后,
+  /// links 里未必还留着前面几话的 key, 那样推断会错位、把没下的话标成可读。
+  final List<int> _doneEps = [];
+
   @override
-  Future<void> onEpisodeDownloaded() async {
+  Future<void> onEpisodeDownloaded(int ep) async {
     if (directory == null) return;
-    /// links 的 key 是 1-based 话序号, 且只含真的取到图片的话 —— 跳过的话不在里面,
-    /// 所以不能再用 _downloadEps.take() 推断(有跳过时两者会错位)。
-    var done = links!.keys.take(downloadingEp).map((e) => e - 1).toList();
-    if (done.isEmpty) return;
+    /// links 的 key 是 1-based 话序号; 取不到图片的话(空列表)不算下完。
+    /// 没有章节概念的源只有一个 key 0, 对应的话序号就是 0。
+    var epIndex = comic.chapters == null ? 0 : ep - 1;
+    if ((links?[ep]?.isEmpty ?? true) || skippedEps.contains(epIndex)) {
+      return;
+    }
+    if (!_doneEps.contains(epIndex)) {
+      _doneEps.add(epIndex);
+    }
 
     /// 只扫这一话新增的目录并累加, 让「已下载」里显示的是真实体积而不是 0.00MB
-    for (var i = _sizedEps; i < done.length; i++) {
-      var epDir = Directory("$path/${done[i] + 1}");
+    for (var i = _sizedEps; i < _doneEps.length; i++) {
+      var epDir = Directory("$path/${_doneEps[i] + 1}");
       if (epDir.existsSync()) {
         _knownSize += await getFolderSize(epDir);
       }
     }
-    _sizedEps = done.length;
+    _sizedEps = _doneEps.length;
 
-    if (done.length == _syncedEps) return;
+    if (_doneEps.length == _syncedEps) return;
     /// 「已下载」区域只在第一话下完时刷一次, 后面各话只更新数据库不刷页面,
     /// 免得用户正在看的列表反复跳动(整本下完时 onTaskFinished 会再刷一次)。
     var firstEpisode = _syncedEps == 0;
-    _syncedEps = done.length;
+    _syncedEps = _doneEps.length;
     DownloadManager().addPartiallyDownloaded(
-        await _buildDownloadedItem(done, size: _knownSize), directory!,
+        await _buildDownloadedItem(_doneEps, size: _knownSize), directory!,
         refresh: firstEpisode);
   }
 

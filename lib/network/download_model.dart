@@ -162,6 +162,9 @@ abstract class DownloadingItem with _TransferSpeedMixin {
       onError?.call();
       _retryTimes = 0;
     } else {
+      /// 每一次任务级重试都给单张图重新计次数, 否则第一轮用光额度后
+      /// 后面几轮会立刻放弃, 白白浪费重试机会
+      _imageRetryTimes.clear();
       await Future.delayed(Duration(seconds: 2 << _retryTimes));
       start();
     }
@@ -181,6 +184,13 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   final _downloading = <String, _ImageDownloadWrapper>{};
 
+  /// 同一张图的连续失败次数。图片地址失效时源站会一直拒,
+  /// 不设上限的话"失败→重建任务→再失败"会原地打转(日志刷屏, 任务永远不推进)。
+  final _imageRetryTimes = <String, int>{};
+
+  /// 单张图最多重试几次, 超过就停下来把错误交给任务级处理
+  static const _maxImageRetry = 3;
+
   void _addDownloading(String link, int ep, int index) {
     var downloadTo = '';
     var basename = '';
@@ -193,13 +203,32 @@ abstract class DownloadingItem with _TransferSpeedMixin {
     }
     if (_downloading["$ep$index"] == null ||
         _downloading["$ep$index"]!.error != null) {
-      _downloading["$ep$index"] = _ImageDownloadWrapper(
+      var taskKey = "$ep$index";
+      _downloading[taskKey] = _ImageDownloadWrapper(
         downloadImage(link),
         downloadTo,
         basename,
         onData,
         () {
           updateInfo?.call();
+          if (_downloading[taskKey]?.error != null) {
+            /// 4xx 说明地址本身不可用(多半是带签名的地址过期了), 原地重试没意义,
+            /// 直接停下来交给任务级重取地址
+            if (_isStaleLinkError(_downloading[taskKey]!.error!)) {
+              return;
+            }
+            var times = (_imageRetryTimes[taskKey] ?? 0) + 1;
+            _imageRetryTimes[taskKey] = times;
+            if (times > _maxImageRetry) {
+              /// 放弃原地重试, 等待中的 start() 会拿到这个错误并走任务级重试
+              return;
+            }
+            Future.delayed(Duration(milliseconds: 300 * times), () {
+              _scheduleTasks(ep, this.index);
+            });
+            return;
+          }
+          _imageRetryTimes.remove(taskKey);
           _scheduleTasks(ep, this.index);
         },
       );
@@ -239,8 +268,10 @@ abstract class DownloadingItem with _TransferSpeedMixin {
       runRecorder();
 
       // download images
-      while (_downloadingEp < links!.length && currentKey == _runtimeKey) {
-        int ep = links!.keys.elementAt(_downloadingEp);
+      while (_downloadingEp < totalEps && currentKey == _runtimeKey) {
+        /// 懒加载: 按需取这一话的图片地址, 不再开下载就先预取全书地址
+        int ep = await ensureEpLinks(_downloadingEp);
+        if (currentKey != _runtimeKey) return;
         var urls = links![ep]!;
         while (index < urls.length && currentKey == _runtimeKey) {
           notifications.sendProgressNotification(downloadedPages, totalPages,
@@ -259,6 +290,7 @@ abstract class DownloadingItem with _TransferSpeedMixin {
             throw Exception("Task not finished");
           }
           _downloading.remove("$ep$index");
+          _imageRetryTimes.remove("$ep$index");
           index++;
           _downloadedNum++;
           await updateInfo?.call();
@@ -267,19 +299,56 @@ abstract class DownloadingItem with _TransferSpeedMixin {
         index = 0;
         _downloadingEp++;
         /// 让「已下载」列表立刻能看到这本书, 不必等整本下完
-        await onEpisodeDownloaded();
+        await onEpisodeDownloaded(ep);
         await updateInfo?.call();
       }
 
       // finish downloading
       if (!DownloadManager().isActive(this)) return;
+      _staleLinkRefresh = 0;
       notifyDownloadFinished();
       _stopAllTasks();
     } catch (e, s) {
       if (currentKey != _runtimeKey) return;
       LogManager.addLog(LogLevel.error, "Download", "$e\n$s");
+      if (_isStaleLinkError(e)) {
+        /// 图片地址带签名有效期时(再漫画的 images 域名就是), 隔天继续下载
+        /// 用的还是昨天那批地址, 源站一律 4xx。这种情况必须重新取地址 ——
+        /// 拿同一批失效链接重试多少次都是白搭。
+        /// 配合懒加载, 重取只花"当前这一话"的请求, 不是整本重来。
+        _staleLinkRefresh++;
+        if (_staleLinkRefresh > 3) {
+          _staleLinkRefresh = 0;
+          LogManager.addLog(LogLevel.error, "Download",
+              "图片地址重取 3 次后仍被拒, 该漫画可能需要在源站重新登录或有阅读权限限制");
+          onError?.call();
+          return;
+        }
+        LogManager.addLog(LogLevel.warning, "Download",
+            "图片地址已失效(第 $_staleLinkRefresh 次重取), 重新获取本话及之后的地址");
+        links = null;
+        _downloading.clear();
+        _imageRetryTimes.clear();
+        linkDone = null;
+        linkTotal = null;
+        start();
+        return;
+      }
       retry();
     }
+  }
+
+  /// 图片地址失效后已经重取过几次
+  int _staleLinkRefresh = 0;
+
+  /// 这个错误是否说明"图片地址不可用"(源站对图片返回了 4xx)
+  bool _isStaleLinkError(Object e) {
+    if (e is BadRequestException) return true;
+    if (e is DioException) {
+      var code = e.response?.statusCode;
+      return code != null && code >= 400 && code < 500;
+    }
+    return false;
   }
 
   void _stopAllTasks() {
@@ -384,6 +453,20 @@ abstract class DownloadingItem with _TransferSpeedMixin {
   /// if platform don't have episode, this only have one key: 0.
   Future<Map<int, List<String>>> getLinks();
 
+  /// 本次要下的话数。默认等于已取到的地址条数(这些源一次性取全部地址);
+  /// 懒加载的源(地址带签名有效期)覆盖成"实际要下的话数"。
+  int get totalEps => links?.length ?? 1;
+
+  /// 懒加载点: 确保第 [position] 话(从 0 开始)的图片地址已在 [links] 里,
+  /// 返回它在 [links] 里的 key。
+  ///
+  /// 默认实现适用于"getLinks 一次就取全"的源, 不需要额外做事。
+  /// 图片地址带有效期(再漫画的 images 域名)的源要覆盖它, 改成只取这一话 ——
+  /// 一次性预取全书地址, 隔天继续下载时那批地址已经全部过期了。
+  Future<int> ensureEpLinks(int position) async {
+    return links!.keys.elementAt(position);
+  }
+
   /// whether this platform have episode
   bool get haveEps =>
       type != DownloadType.ehentai &&
@@ -398,6 +481,12 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   ///总共的图片数量
   int get totalPages => links?.totalLength ?? 0;
+
+  /// 懒加载的分话下载任务用"话"来显示进度: 后面的话还没取地址, 总页数不可知,
+  /// 拿页数当分母会算出超过 100% 的进度。其它任务返回 null(沿用页数口径)。
+  int? get episodeDone => null;
+
+  int? get episodeTotal => null;
 
   ///已下载的图片数量
   int get downloadedPages => _downloadedNum;
@@ -421,7 +510,8 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   /// 分话下载的任务每下完一话调用一次, 用于把当前进度同步进「已下载」列表。
   /// 默认空实现: 只有支持部分下载的源(如 JS 源)才需要覆写。
-  Future<void> onEpisodeDownloaded() async {}
+  /// [ep] 是这一话在 [links] 里的 key(便于覆写方知道刚下完的是哪一话)。
+  Future<void> onEpisodeDownloaded(int ep) async {}
 
   /// 完成下载时调用, 让 DownloadManager 收尾(移出队列、释放源槽、安排下一个)。
   /// 带上自身: 并发下载时完成的未必是队首。
