@@ -372,6 +372,32 @@ class DownloadPage extends StatelessWidget {
     }
   }
 
+  /// 把下载条目还原成写历史记录时用的 target:
+  /// 与 ReadComic.read / History.findOrCreate 的键保持一致, 才能点亮
+  /// ComicTile 上的阅读位置角标。
+  String? _historyTargetOf(DownloadedItem item) {
+    switch (item.type) {
+      case DownloadType.picacg:
+        return (item as DownloadedComic).comicItem.id;
+      case DownloadType.ehentai:
+        return (item as DownloadedGallery).gallery.link;
+      case DownloadType.jm:
+        return item.id.startsWith('jm') ? item.id.substring(2) : null;
+      case DownloadType.hitomi:
+        return (item as DownloadedHitomiComic).comic.id;
+      case DownloadType.htmanga:
+        return item.id.startsWith('Ht') ? item.id.substring(2) : null;
+      case DownloadType.nhentai:
+        return item.id.startsWith('nhentai')
+            ? item.id.substring(7)
+            : item.id;
+      case DownloadType.other:
+        return (item as CustomDownloadedItem).comicId;
+      default:
+        return null;
+    }
+  }
+
   Widget buildItem(BuildContext context, DownloadPageLogic logic, int index) {
     bool selected = logic.selected[index];
     var type = logic.comics[index].type.name;
@@ -392,6 +418,7 @@ class DownloadPage extends StatelessWidget {
           imagePath: downloadManager.getCover(logic.comics[index].id),
           type: type,
           tag: logic.comics[index].tags,
+          comicId: _historyTargetOf(logic.comics[index]),
           onTap: () async {
             if (logic.selecting) {
               logic.selected[index] = !logic.selected[index];
@@ -1193,6 +1220,7 @@ class DownloadedComicTile extends ComicTile {
   final String name;
   final String type;
   final List<String> tag;
+  final String? comicId;
   final void Function() onTap;
   final void Function() onLongTap;
   final void Function(TapDownDetails details) onSecondaryTap;
@@ -1232,11 +1260,16 @@ class DownloadedComicTile extends ComicTile {
   @override
   String? get badge => type;
 
+  /// 历史记录的键(各源写入 history 时的 target); null 表示无法还原
+  @override
+  String? get comicID => comicId;
+
   const DownloadedComicTile(
       {required this.size,
       required this.imagePath,
       required this.author,
       required this.name,
+      this.comicId,
       required this.onTap,
       required this.onLongTap,
       required this.onSecondaryTap,

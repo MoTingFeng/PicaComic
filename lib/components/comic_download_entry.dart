@@ -220,7 +220,8 @@ Future<DownloadEnqueueOutcome> downloadComicDirectly({
 /// 面板列出每一本漫画及其状态与话数/页数, 每本可展开查看逐话页数
 /// (展开时才请求)。处理过程中可中断, 剩余的不再入队。
 Future<void> downloadComicsDirectly(
-    List<({String key, String target, String title})> requests) async {
+    List<({String key, String target, String title})> requests,
+  {void Function()? onConfirmed}) async {
   if (requests.isEmpty) {
     showToast(message: "所选漫画不支持直接下载".tl);
     return;
@@ -228,6 +229,8 @@ Future<void> downloadComicsDirectly(
   if (!await _confirmDownload("", count: requests.length)) {
     return;
   }
+  // 确认通过才通知调用方(如退出多选); 用户取消则完全不动
+  onConfirmed?.call();
 
   var progress = ValueNotifier<List<DownloadEnqueueOutcome?>>(
       List<DownloadEnqueueOutcome?>.filled(requests.length, null));
@@ -256,6 +259,14 @@ Future<void> downloadComicsDirectly(
     currentIndex.value = -1;
   }
 
+  var panelClosed = false;
+  void closePanel(BuildContext dialogContext) {
+    panelClosed = true;
+    if (dialogContext.mounted) {
+      dialogContext.pop();
+    }
+  }
+
   showDialog(
     context: App.globalContext!,
     barrierDismissible: false,
@@ -265,23 +276,43 @@ Future<void> downloadComicsDirectly(
       currentIndex: currentIndex,
       running: running,
       onCancel: () => cancelled = true,
-      onClose: () {
-        if (dialogContext.mounted) {
-          dialogContext.pop();
-        }
-      },
+      onClose: () => closePanel(dialogContext),
       onRetry: (indices) async {
         // 之前若点过「中断」, cancelled 会停在 true, 这里必须复位才能继续处理
         cancelled = false;
         running.value = true;
         await runIndices(indices);
         running.value = false;
+        // 重试完全部成功时同样自动收起, 有失败项则留着供再次重试
+        if (!panelClosed && !cancelled) {
+          var allDone = progress.value.every((e) => e != null);
+          var anyFailed =
+              progress.value.any((e) => e?.result == DownloadEnqueueResult.failed);
+          if (allDone && !anyFailed) {
+            closePanel(dialogContext);
+          }
+        }
       },
     ),
   );
 
   await runIndices(List<int>.generate(requests.length, (i) => i));
   running.value = false;
+  // 全部入队且没有失败、用户也没主动操作面板时自动关闭,
+  // 不再残留一个"确认完还挂着"的进度框
+  if (!panelClosed && !cancelled) {
+    var allDone = progress.value.every((e) => e != null);
+    var anyFailed =
+        progress.value.any((e) => e?.result == DownloadEnqueueResult.failed);
+    if (allDone && !anyFailed) {
+      // 稍等片刻让最终状态渲染出来再收起
+      await Future.delayed(const Duration(milliseconds: 600));
+      // 延迟期间用户可能点了中断或后台运行, 复查后再关
+      if (!panelClosed && !cancelled) {
+        App.globalBack();
+      }
+    }
+  }
 }
 
 /// 查询某本漫画在下载队列中的进度; 不在队列中返回 null。

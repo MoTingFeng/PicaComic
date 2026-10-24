@@ -694,7 +694,10 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
                   showToast(message: "请先选择漫画".tl);
                   return;
                 }
-                downloadComicsDirectly(requests);
+                // 确认下载后由回调退出多选(清空选择并收起横幅);
+                // 在确认框点取消则保留选择, 可继续调整
+                downloadComicsDirectly(requests,
+                    onConfirmed: logic.exitSelectionMode);
               },
               child: Text("下载".tl),
             ),
