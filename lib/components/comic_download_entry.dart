@@ -1,7 +1,5 @@
 part of 'components.dart';
 
-// 构建触发探针: 无功能影响, 可随下次改动一并删除
-
 /// 没有章节概念的内置源：一本即全部内容。
 const _wholeComicSources = {'ehentai', 'hitomi', 'htmanga', 'nhentai'};
 
