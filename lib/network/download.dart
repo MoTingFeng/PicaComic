@@ -435,18 +435,27 @@ class DownloadManager with _DownloadDb implements Listenable {
   }
 
   ///删除已下载的漫画
+  ///
+  ///必须先取目录名再删数据库记录: getDirectory 靠查库解析 id -> 目录,
+  ///顺序反了会导致整批删除在第一项就抛异常中断。
   Future<void> delete(List<String> ids) async {
     for (var id in ids) {
-      _deleteFromDb(id);
-      var comic = Directory("$path/${getDirectory(id)}");
       try {
-        comic.delete(recursive: true);
-      } catch (e) {
-        if (e is PathNotFoundException) {
-          //忽略
-        } else {
-          rethrow;
+        var directory = getDirectory(id);
+        _deleteFromDb(id);
+        var comic = Directory("$path/$directory");
+        try {
+          comic.delete(recursive: true);
+        } catch (e) {
+          if (e is PathNotFoundException) {
+            //忽略
+          } else {
+            rethrow;
+          }
         }
+      } catch (e) {
+        //单项失败不阻断整批删除
+        LogManager.addLog(LogLevel.error, "IO", "Failed to delete $id\n$e");
       }
     }
   }
