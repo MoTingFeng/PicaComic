@@ -761,6 +761,24 @@ class DownloadPage extends StatelessWidget {
                       },
                     ),
                     PopupMenuItem(
+                      child: Text("全选已看过".tl),
+                      onTap: () {
+                        // 判据与封面上的阅读位置角标一致: 本地历史记录里
+                        // 有该条目(键由 _historyTargetOf 还原)即视为看过
+                        logic.selected = logic.comics.map((comic) {
+                          var target = _historyTargetOf(comic);
+                          return target != null &&
+                              HistoryManager().findSync(target) != null;
+                        }).toList();
+                        logic.selectedNum =
+                            logic.selected.where((e) => e).length;
+                        if (logic.selectedNum == 0) {
+                          showToast(message: "没有已看过的漫画".tl);
+                        }
+                        logic.update();
+                      },
+                    ),
+                    PopupMenuItem(
                       child: Text("导出".tl),
                       onTap: () => exportSelectedComic(context, logic),
                     ),
