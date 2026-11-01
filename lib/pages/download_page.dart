@@ -271,7 +271,8 @@ class DownloadPage extends StatelessWidget {
     return [
       for (var section in sections) ...[
         if (showTitle)
-          _buildGroupTitle(context, section.$1, section.$3 - section.$2),
+          _buildGroupTitle(
+              context, logic, section.$1, section.$2, section.$3),
         buildGrid(context, logic, section.$2, section.$3 - section.$2),
       ]
     ];
@@ -288,10 +289,19 @@ class DownloadPage extends StatelessWidget {
     );
   }
 
-  Widget _buildGroupTitle(BuildContext context, String key, int count) {
+  Widget _buildGroupTitle(BuildContext context, DownloadPageLogic logic,
+      String key, int start, int end) {
+    var count = end - start;
+    var allSelected = true;
+    for (int i = start; i < end; i++) {
+      if (i >= logic.selected.length || !logic.selected[i]) {
+        allSelected = false;
+        break;
+      }
+    }
     return SliverToBoxAdapter(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
         child: Row(
           children: [
             Text(_groupName(key),
@@ -301,6 +311,22 @@ class DownloadPage extends StatelessWidget {
             Text("$count",
                 style: TextStyle(
                     fontSize: 14, color: Theme.of(context).colorScheme.outline)),
+            const Spacer(),
+            // 只作用于本组: 全选本组 / 取消本组, 不碰其它组已选中的条目
+            TextButton(
+              onPressed: () {
+                for (int i = start;
+                    i < end && i < logic.selected.length;
+                    i++) {
+                  logic.selected[i] = !allSelected;
+                }
+                logic.selectedNum =
+                    logic.selected.where((e) => e).length;
+                logic.selecting = logic.selectedNum > 0;
+                logic.update();
+              },
+              child: Text(allSelected ? "取消本组".tl : "全选本组".tl),
+            ),
           ],
         ),
       ),
