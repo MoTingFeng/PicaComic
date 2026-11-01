@@ -239,7 +239,7 @@ class DownloadPage extends StatelessWidget {
               body: SmoothCustomScrollView(
                 slivers: [
                   buildAppbar(context, logic),
-                  buildComics(context, logic)
+                  ...buildComics(context, logic)
                 ],
               ),
             );
@@ -247,16 +247,113 @@ class DownloadPage extends StatelessWidget {
         });
   }
 
-  Widget buildComics(BuildContext context, DownloadPageLogic logic) {
+  List<Widget> buildComics(BuildContext context, DownloadPageLogic logic) {
     logic.find();
     final comics = logic.comics;
+    if (appdata.settings[90] != "1") {
+      return [buildGrid(context, logic, 0, comics.length)];
+    }
+    // 按漫画源分组: getComics 已把同源条目排在一起, 这里只负责切成连续段,
+    // 索引用全局下标(start + index), 与 logic.selected 保持一致
+    var sections = <(String, int, int)>[];
+    var start = 0;
+    while (start < comics.length) {
+      var key = _groupKey(comics[start]);
+      var end = start + 1;
+      while (end < comics.length && _groupKey(comics[end]) == key) {
+        end++;
+      }
+      sections.add((key, start, end));
+      start = end;
+    }
+    // 只有一个源时不显示分组标题, 避免白占一行
+    var showTitle = sections.length > 1;
+    return [
+      for (var section in sections) ...[
+        if (showTitle)
+          _buildGroupTitle(context, section.$1, section.$3 - section.$2),
+        buildGrid(context, logic, section.$2, section.$3 - section.$2),
+      ]
+    ];
+  }
+
+  Widget buildGrid(
+      BuildContext context, DownloadPageLogic logic, int start, int count) {
     return SliverGrid(
-      delegate: SliverChildBuilderDelegate(childCount: comics.length,
+      delegate: SliverChildBuilderDelegate(childCount: count,
           (context, index) {
-        return buildItem(context, logic, index);
+        return buildItem(context, logic, start + index);
       }),
       gridDelegate: SliverGridDelegateWithComics(),
     );
+  }
+
+  Widget _buildGroupTitle(BuildContext context, String key, int count) {
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Row(
+          children: [
+            Text(_groupName(key),
+                style: const TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.w500)),
+            const SizedBox(width: 8),
+            Text("$count",
+                style: TextStyle(
+                    fontSize: 14, color: Theme.of(context).colorScheme.outline)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 内置源的固定分组顺序; 自定义源排在其后, 组间按显示名排序
+  static const _builtinGroupOrder = [
+    "picacg",
+    "ehentai",
+    "jm",
+    "hitomi",
+    "htmanga",
+    "nhentai"
+  ];
+
+  /// 分组键: 内置源按类型, JS 源返回真实 sourceKey
+  String _groupKey(DownloadedItem item) => item.sourceKey ?? item.type.name;
+
+  /// 分组标题上的源名
+  String _groupName(String key) {
+    var name = ComicSource.find(key)?.name;
+    if (name != null && name.isNotEmpty) {
+      return name;
+    }
+    switch (key) {
+      case "jm":
+        return "禁漫天堂";
+      case "htmanga":
+        return "绅士漫画";
+      default:
+        return key;
+    }
+  }
+
+  /// 组的先后顺序: 内置源固定序, 自定义源排后面按名称
+  int _groupRank(String key) {
+    var i = _builtinGroupOrder.indexOf(key);
+    return i == -1 ? _builtinGroupOrder.length : i;
+  }
+
+  /// 把同源条目聚到一起, 组内保持原有排序
+  List<DownloadedItem> _applyGrouping(List<DownloadedItem> comics) {
+    var buckets = <String, List<DownloadedItem>>{};
+    for (var comic in comics) {
+      buckets.putIfAbsent(_groupKey(comic), () => []).add(comic);
+    }
+    var keys = buckets.keys.toList()
+      ..sort((a, b) {
+        var rank = _groupRank(a).compareTo(_groupRank(b));
+        return rank != 0 ? rank : _groupName(a).compareTo(_groupName(b));
+      });
+    return [for (var key in keys) ...buckets[key]!];
   }
 
   Future<void> getComics(DownloadPageLogic logic) async {
@@ -277,6 +374,9 @@ class DownloadPage extends StatelessWidget {
       direction = 'asc';
     }
     logic.comics = DownloadManager().getAll(order, direction);
+    if (appdata.settings[90] == "1") {
+      logic.comics = _applyGrouping(logic.comics);
+    }
     logic.baseComics = logic.comics.toList();
   }
 
@@ -707,6 +807,19 @@ class DownloadPage extends StatelessWidget {
                                         .settings[26]
                                         .setValueAt("0", 1);
                                   }
+                                  appdata.updateSettings();
+                                  changed = true;
+                                },
+                              ),
+                            ),
+                            ListTile(
+                              title: Text("按漫画源分组".tl),
+                              subtitle: Text("同源漫画聚在一起, 组内仍按上面的排序".tl),
+                              trailing: StatefulSwitch(
+                                initialValue:
+                                appdata.settings[90] == "1",
+                                onChanged: (b) {
+                                  appdata.settings[90] = b ? "1" : "0";
                                   appdata.updateSettings();
                                   changed = true;
                                 },
