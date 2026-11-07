@@ -37,6 +37,9 @@ import 'package:pica_comic/components/components.dart';
 
 import 'htmanga/ht_comic_page.dart';
 
+///已下载条目的源标识: 内置源取 DownloadType 名, 自定义源取真实 sourceKey
+String _sourceKeyOf(DownloadedItem item) => item.sourceKey ?? item.type.name;
+
 extension ReadComic on DownloadedItem {
   void read({int? ep}) async {
     final comic = this;
@@ -168,6 +171,13 @@ class DownloadPageLogic extends StateController {
   String keyword = "";
   String keyword_ = "";
 
+  ///源筛选: 空字符串表示「全部」, 否则为源 key (内置源如 picacg/jm, 自定义源为 sourceKey)
+  String sourceFilter = "";
+  String sourceFilter_ = "";
+
+  ///列表内容被整体替换(重新加载/删除条目)后置位, 让下一次 find() 重算而不是走缓存
+  bool filterDirty = true;
+
   void change() {
     loading = !loading;
     try {
@@ -178,20 +188,27 @@ class DownloadPageLogic extends StateController {
   }
 
   void find() {
-    if (keyword == keyword_) {
+    if (!filterDirty &&
+        keyword == keyword_ &&
+        sourceFilter == sourceFilter_) {
       return;
     }
+    filterDirty = false;
     keyword_ = keyword;
+    sourceFilter_ = sourceFilter;
     comics.clear();
-    if (keyword == "") {
-      comics.addAll(baseComics);
-    } else {
-      for (var element in baseComics) {
-        if (element.name.toLowerCase().contains(keyword) ||
-            element.subTitle.toLowerCase().contains(keyword)) {
-          comics.add(element);
-        }
+    // 源筛选与关键字搜索叠加生效: 选中某个源后, 列表只留该源的条目,
+    // 全选/全选已看过/删除/导出都基于 comics, 因此自然只作用于当前源
+    for (var element in baseComics) {
+      if (sourceFilter.isNotEmpty && _sourceKeyOf(element) != sourceFilter) {
+        continue;
       }
+      if (keyword != "" &&
+          !element.name.toLowerCase().contains(keyword) &&
+          !element.subTitle.toLowerCase().contains(keyword)) {
+        continue;
+      }
+      comics.add(element);
     }
     resetSelected(comics.length);
   }
@@ -249,33 +266,9 @@ class DownloadPage extends StatelessWidget {
 
   List<Widget> buildComics(BuildContext context, DownloadPageLogic logic) {
     logic.find();
-    final comics = logic.comics;
-    if (appdata.settings[90] != "1") {
-      return [buildGrid(context, logic, 0, comics.length)];
-    }
-    // 按漫画源分组: getComics 已把同源条目排在一起, 这里只负责切成连续段,
-    // 索引用全局下标(start + index), 与 logic.selected 保持一致
-    var sections = <(String, int, int)>[];
-    var start = 0;
-    while (start < comics.length) {
-      var key = _groupKey(comics[start]);
-      var end = start + 1;
-      while (end < comics.length && _groupKey(comics[end]) == key) {
-        end++;
-      }
-      sections.add((key, start, end));
-      start = end;
-    }
-    // 只有一个源时不显示分组标题, 避免白占一行
-    var showTitle = sections.length > 1;
-    return [
-      for (var section in sections) ...[
-        if (showTitle)
-          _buildGroupTitle(
-              context, logic, section.$1, section.$2, section.$3),
-        buildGrid(context, logic, section.$2, section.$3 - section.$2),
-      ]
-    ];
+    // comics 已经是「当前源筛选 + 关键字」过滤后的结果, 直接整块铺网格;
+    // 全选/全选已看过/删除/导出都基于 comics, 天然只作用于当前选中的源
+    return [buildGrid(context, logic, 0, logic.comics.length)];
   }
 
   Widget buildGrid(
@@ -289,45 +282,74 @@ class DownloadPage extends StatelessWidget {
     );
   }
 
-  Widget _buildGroupTitle(BuildContext context, DownloadPageLogic logic,
-      String key, int start, int end) {
-    var count = end - start;
-    var allSelected = true;
-    for (int i = start; i < end; i++) {
-      if (i >= logic.selected.length || !logic.selected[i]) {
-        allSelected = false;
-        break;
-      }
+  /// 源筛选下拉: 「全部」+ 每个有已下载条目的源, 选完之后列表只剩该源的条目
+  Widget _buildSourceFilter(BuildContext context, DownloadPageLogic logic) {
+    var counts = <String, int>{};
+    for (var comic in logic.baseComics) {
+      var key = _sourceKeyOf(comic);
+      counts[key] = (counts[key] ?? 0) + 1;
     }
-    return SliverToBoxAdapter(
+    var keys = counts.keys.toList()
+      ..sort((a, b) {
+        var rank = _groupRank(a).compareTo(_groupRank(b));
+        return rank != 0 ? rank : _groupName(a).compareTo(_groupName(b));
+      });
+    // 只有一个源时筛选没有意义, 不占位置
+    if (keys.length < 2) {
+      return const SizedBox.shrink();
+    }
+    Widget entry(String key, String title, int count) {
+      var current = key == logic.sourceFilter;
+      return Row(
+        children: [
+          SizedBox(
+            width: 24,
+            child: current ? const Icon(Icons.check, size: 18) : null,
+          ),
+          Expanded(
+              child: Text(title, overflow: TextOverflow.ellipsis)),
+          const SizedBox(width: 12),
+          Text("$count",
+              style: TextStyle(
+                  fontSize: 13,
+                  color: Theme.of(context).colorScheme.outline)),
+        ],
+      );
+    }
+
+    return PopupMenuButton<String>(
+      tooltip: "筛选漫画源".tl,
+      position: PopupMenuPosition.under,
+      onSelected: (key) {
+        logic.sourceFilter = key;
+        appdata.settings[90] = key;
+        appdata.updateSettings();
+        // 切换源后重算 comics, 选中状态随 resetSelected 一起清空,
+        // 不会出现「在 A 源勾选、切到 B 源后误删 A 源条目」
+        logic.filterDirty = true;
+        logic.find();
+        logic.update();
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem(
+          value: "",
+          child: entry("", "全部".tl, logic.baseComics.length),
+        ),
+        for (var key in keys)
+          PopupMenuItem(
+            value: key,
+            child: entry(key, _groupName(key), counts[key] ?? 0),
+          ),
+      ],
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
-        child: Row(
-          children: [
-            Text(_groupName(key),
-                style: const TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.w500)),
-            const SizedBox(width: 8),
-            Text("$count",
-                style: TextStyle(
-                    fontSize: 14, color: Theme.of(context).colorScheme.outline)),
-            const Spacer(),
-            // 只作用于本组: 全选本组 / 取消本组, 不碰其它组已选中的条目
-            TextButton(
-              onPressed: () {
-                for (int i = start;
-                    i < end && i < logic.selected.length;
-                    i++) {
-                  logic.selected[i] = !allSelected;
-                }
-                logic.selectedNum =
-                    logic.selected.where((e) => e).length;
-                logic.selecting = logic.selectedNum > 0;
-                logic.update();
-              },
-              child: Text(allSelected ? "取消本组".tl : "全选本组".tl),
-            ),
-          ],
+        padding: const EdgeInsets.all(12),
+        child: Icon(
+          logic.sourceFilter.isEmpty
+              ? Icons.filter_alt_outlined
+              : Icons.filter_alt,
+          color: logic.sourceFilter.isEmpty
+              ? null
+              : Theme.of(context).colorScheme.primary,
         ),
       ),
     );
@@ -343,10 +365,7 @@ class DownloadPage extends StatelessWidget {
     "nhentai"
   ];
 
-  /// 分组键: 内置源按类型, JS 源返回真实 sourceKey
-  String _groupKey(DownloadedItem item) => item.sourceKey ?? item.type.name;
-
-  /// 分组标题上的源名
+  /// 源在下拉里的显示名
   String _groupName(String key) {
     var name = ComicSource.find(key)?.name;
     if (name != null && name.isNotEmpty) {
@@ -372,7 +391,7 @@ class DownloadPage extends StatelessWidget {
   List<DownloadedItem> _applyGrouping(List<DownloadedItem> comics) {
     var buckets = <String, List<DownloadedItem>>{};
     for (var comic in comics) {
-      buckets.putIfAbsent(_groupKey(comic), () => []).add(comic);
+      buckets.putIfAbsent(_sourceKeyOf(comic), () => []).add(comic);
     }
     var keys = buckets.keys.toList()
       ..sort((a, b) {
@@ -400,10 +419,23 @@ class DownloadPage extends StatelessWidget {
       direction = 'asc';
     }
     logic.comics = DownloadManager().getAll(order, direction);
-    if (appdata.settings[90] == "1") {
-      logic.comics = _applyGrouping(logic.comics);
-    }
+    // 同源条目始终聚在一起(组内保持上面的排序), 但不再插入分组标题,
+    // 由顶部的源筛选下拉决定当前显示哪个源
+    logic.comics = _applyGrouping(logic.comics);
     logic.baseComics = logic.comics.toList();
+    // 90 号槽位存的是当前筛选的源 key; 旧版本把它当过布尔开关("0"/"1"),
+    // 这两个值不是合法源 key, 一律视为「全部」
+    var saved = appdata.settings[90];
+    logic.sourceFilter = (saved == "0" || saved == "1") ? "" : saved;
+    // 记住的源已经被整源删空 / 源被禁用时, 回到「全部」, 避免打开就是空列表
+    if (logic.sourceFilter.isNotEmpty &&
+        !logic.baseComics
+            .any((comic) => _sourceKeyOf(comic) == logic.sourceFilter)) {
+      logic.sourceFilter = "";
+      appdata.settings[90] = "";
+      appdata.updateSettings();
+    }
+    logic.filterDirty = true;
   }
 
   Future<void> export(DownloadPageLogic logic) async {
@@ -724,7 +756,16 @@ class DownloadPage extends StatelessWidget {
                                 .removeWhere((c) => comics.contains(c.id));
                             logic.searchMode = false;
                             logic.selecting = false;
-                            logic.resetSelected(logic.comics.length);
+                            // 当前筛选的源被删空时回到「全部」, 不留一个空列表
+                            if (logic.sourceFilter.isNotEmpty &&
+                                !logic.baseComics.any((c) =>
+                                    _sourceKeyOf(c) == logic.sourceFilter)) {
+                              logic.sourceFilter = "";
+                              appdata.settings[90] = "";
+                              appdata.updateSettings();
+                            }
+                            logic.filterDirty = true;
+                            logic.find();
                             logic.update();
                           },
                           child: Text("确认".tl)),
@@ -788,6 +829,8 @@ class DownloadPage extends StatelessWidget {
   List<Widget> buildActions(BuildContext context, DownloadPageLogic logic) {
     return [
       if (!logic.selecting && !logic.searchMode)
+        _buildSourceFilter(context, logic),
+      if (!logic.selecting && !logic.searchMode)
         Tooltip(
           message: "排序".tl,
           child: IconButton(
@@ -833,19 +876,6 @@ class DownloadPage extends StatelessWidget {
                                         .settings[26]
                                         .setValueAt("0", 1);
                                   }
-                                  appdata.updateSettings();
-                                  changed = true;
-                                },
-                              ),
-                            ),
-                            ListTile(
-                              title: Text("按漫画源分组".tl),
-                              subtitle: Text("同源漫画聚在一起, 组内仍按上面的排序".tl),
-                              trailing: StatefulSwitch(
-                                initialValue:
-                                appdata.settings[90] == "1",
-                                onChanged: (b) {
-                                  appdata.settings[90] = b ? "1" : "0";
                                   appdata.updateSettings();
                                   changed = true;
                                 },
