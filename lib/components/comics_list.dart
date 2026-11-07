@@ -129,6 +129,69 @@ class ComicsPageLogic<T> extends StateController {
     update();
   }
 
+  /// 顺序模式(累加列表)下补齐加载到第 [target] 页, 用于跳回上次浏览的位置。
+  ///
+  /// 返回是否补齐成功; 某页请求失败或返回空都会停下并返回 false。
+  Future<bool> loadTo(
+      Future<Res<List<T>>> Function(int) getComics, int target,
+      {void Function(int loaded, int target)? onProgress}) async {
+    var list = comics;
+    if (list == null) return false;
+    // 占用加载锁: 补齐期间滚动到底不再触发 loadNextPage, 避免同一页被请求两次
+    if (loadingData) return false;
+    loadingData = true;
+    try {
+      if (maxPage != null && target > maxPage!) target = maxPage!;
+      while (current < target) {
+        onProgress?.call(current, target);
+        var res = await getComics(current + 1);
+        if (res.error) {
+          showToast(message: res.errorMessage!);
+          return false;
+        }
+        if (res.subData is int) {
+          maxPage = res.subData as int;
+        }
+        if (res.data.isEmpty) {
+          // 该页为空(到底或被屏蔽): 不再往后补
+          maxPage ??= current;
+          update();
+          return false;
+        }
+        dividedComics ??= {};
+        dividedComics![current + 1] = res.data;
+        list.addAll(res.data);
+        current++;
+        update();
+      }
+      onProgress?.call(current, target);
+      return true;
+    } finally {
+      loadingData = false;
+    }
+  }
+
+  /// 分页模式下直接跳到第 [page] 页(只需一次请求)
+  Future<bool> jumpTo(
+      Future<Res<List<T>>> Function(int) getComics, int page) async {
+    if (maxPage != null && page > maxPage!) page = maxPage!;
+    if (page < 1) page = 1;
+    dividedComics ??= {};
+    var res = await getComics(page);
+    if (res.error) {
+      showToast(message: res.errorMessage!);
+      return false;
+    }
+    if (res.subData is int) {
+      maxPage = res.subData as int;
+    }
+    dividedComics![page] = res.data;
+    current = page;
+    loading = false;
+    update();
+    return true;
+  }
+
   @override
   void refresh() {
     loading = true;
@@ -171,6 +234,9 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
 
   List<ComicTileMenuOption>? get addonMenuOptions => null;
 
+  /// 列表每次重建时回调(记录浏览位置这类副作用用), 默认不做任何事
+  void Function(ComicsPageLogic<T> logic)? get onLogicUpdate => null;
+
   /// 刷新页面
   void refresh() {
     StateController.find<ComicsPageLogic<T>>(tag: tag).refresh();
@@ -203,6 +269,7 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
         init: ComicsPageLogic<T>(),
         tag: tag,
         builder: (logic) {
+          onLogicUpdate?.call(logic);
           if (logic.dividedComics?[logic.current] == null &&
               logic.message == null &&
               appdata.settings[25] != "0") {

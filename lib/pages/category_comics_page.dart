@@ -1,7 +1,10 @@
 import "package:flutter/material.dart";
+import "package:pica_comic/base.dart";
 import "package:pica_comic/comic_source/comic_source.dart";
 import 'package:pica_comic/components/components.dart';
 import "package:pica_comic/foundation/app.dart";
+import "package:pica_comic/foundation/browse_anchor.dart";
+import "package:pica_comic/foundation/state_controller.dart";
 import "package:pica_comic/network/base_comic.dart";
 import "package:pica_comic/network/res.dart";
 import "package:pica_comic/tools/translations.dart";
@@ -74,6 +77,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
   @override
   void initState() {
     findData();
+    _initAnchor();
     super.initState();
   }
 
@@ -95,6 +99,215 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
   String get signature =>
       groupValues.entries.map((e) => "${e.key}=${e.value}").join("&");
 
+  // ==== 浏览位置: 记录上次看到第几页, 重进时提示是否跳回 ====
+
+  /// 本次进入页面时读到的锚点, 只在进入时读一次
+  BrowseAnchor? anchor;
+
+  /// 读到的锚点属于哪个筛选组合; 用户切了筛选就不再提示
+  String? _anchorLoadedKey;
+
+  /// 进入时的记录页: 没越过它就不覆盖记录, 否则一进页面(只加载第 1 页)
+  /// 就会把「上次看到第 5 页」冲成第 1 页
+  int _anchorFloor = 0;
+
+  /// 用户点了「从头看」
+  bool anchorDismissed = false;
+
+  bool anchorJumping = false;
+
+  String? anchorProgress;
+
+  AnchorDiff? anchorDiff;
+
+  int? anchorJumpPage;
+
+  String get _sortValue => optionsValue.isEmpty ? "" : optionsValue.first;
+
+  String get _anchorSourceKey {
+    for (final source in ComicSource.sources) {
+      if (source.categoryData?.key == widget.categoryKey) return source.key;
+    }
+    return "";
+  }
+
+  /// 与 _CategoryComicsList.tag 一致, 用来找到当前的 ComicsPageLogic
+  String get _listTag =>
+      "${widget.category} with ${widget.param} and $optionsValue and $signature";
+
+  /// 一个筛选组合(源|分类|子分类|排序|多维度)对应一条存储记录
+  String get _anchorKey =>
+      "$_anchorSourceKey|${widget.category}|${widget.param}|${optionsValue.join(",")}|$signature";
+
+  /// 只对哔咔的非「新到旧」排序启用; 新到旧下新作品插在最前, 页号会整体漂移。
+  /// 「最新」「随机」这类没有排序选项的分类(排序值为空)不参与记录
+  bool get _anchorEnabled =>
+      _anchorSourceKey == "picacg" &&
+      _sortValue.isNotEmpty &&
+      _sortValue != "dd";
+
+  /// 当前列表的取页函数(把源 loader 收成单页参数)
+  Future<Res<List<BaseComic>>> Function(int) get _pageLoader =>
+      (page) => loader(widget.category, widget.param, optionsValue, page);
+
+  void _initAnchor() {
+    if (!_anchorEnabled) return;
+    _anchorLoadedKey = _anchorKey;
+    anchor = BrowseAnchorStore.instance[_anchorKey];
+    _anchorFloor = anchor?.page ?? 0;
+  }
+
+  List<BaseComic> _loadedComics(ComicsPageLogic<BaseComic> logic) {
+    if (appdata.settings[25] == "0") return logic.comics ?? const [];
+    return logic.dividedComics?[logic.current] ?? const [];
+  }
+
+  /// 把当前浏览位置写进本机存储; 列表每次状态变化都会走这里, 内容没变时内部直接返回
+  void _recordAnchor(ComicsPageLogic<BaseComic> logic) {
+    if (!_anchorEnabled) return;
+    if (logic.current <= _anchorFloor) return;
+    var loaded = _loadedComics(logic);
+    if (loaded.isEmpty || logic.current < 1) return;
+    var items = <String, int>{};
+    for (final comic in loaded) {
+      items[comic.id] = comicPageCount(comic) ?? -1;
+    }
+    BrowseAnchorStore.instance.record(
+      _anchorKey,
+      page: logic.current,
+      lastId: loaded.last.id,
+      totalPages: logic.maxPage ?? 0,
+      items: items,
+    );
+  }
+
+  Future<void> _jumpToAnchor() async {
+    var old = anchor;
+    if (old == null || anchorJumping) return;
+    var logic =
+        StateController.findOrNull<ComicsPageLogic<BaseComic>>(tag: _listTag);
+    if (logic == null) return;
+    setState(() {
+      anchorJumping = true;
+      anchorProgress = null;
+      anchorDiff = null;
+    });
+    bool ok;
+    if (appdata.settings[25] == "0") {
+      // 顺序模式是累加列表, 只能一页页补到目标页
+      ok = await logic.loadTo(_pageLoader, old.page,
+          onProgress: (loaded, target) {
+        if (mounted) {
+          setState(() => anchorProgress = "$loaded/$target");
+        }
+      });
+    } else {
+      ok = await logic.jumpTo(_pageLoader, old.page);
+    }
+    if (!mounted) return;
+    var diff = computeAnchorDiff(
+      old: old,
+      loaded: _loadedComics(logic),
+      totalPages: logic.maxPage,
+      stableOrder: _sortValue == "da",
+    );
+    setState(() {
+      anchorJumping = false;
+      anchorProgress = null;
+      anchorJumpPage = logic.current;
+      anchorDiff = ok ? diff : null;
+      // 已经跳到(或尝试跳到)目标页, 之后的浏览照常记录
+      _anchorFloor = 0;
+    });
+    if (!ok) {
+      showToast(message: "部分页加载失败, 浏览位置可能不完整".tl);
+    }
+  }
+
+  /// 是否展示「上次看到第几页」提示条; 切换筛选/子分类后不提示(记录照旧)
+  bool get _showAnchorBanner =>
+      _anchorEnabled &&
+      anchor != null &&
+      !anchorDismissed &&
+      _anchorLoadedKey == _anchorKey;
+
+  Widget buildAnchorBanner() {
+    var old = anchor;
+    if (old == null || !_showAnchorBanner) return const SizedBox.shrink();
+    var theme = Theme.of(context);
+    var diff = anchorDiff;
+    var done = anchorJumpPage != null;
+    String title;
+    String? subtitle;
+    if (anchorJumping) {
+      title = "正在补齐到第 ${old.page} 页".tl;
+      if (anchorProgress != null) {
+        subtitle = "已加载 $anchorProgress 页".tl;
+      }
+    } else if (done) {
+      title = "已跳到第 $anchorJumpPage 页".tl;
+      if (diff == null) {
+        subtitle = "部分页加载失败, 位置可能不完整".tl;
+      } else if (diff.isEmpty) {
+        subtitle = "没有发现新内容".tl;
+      } else {
+        var text = diff.fromPageDiff
+            ? "此后新增约 ${diff.addedCount} 部(${diff.addedPages} 页)"
+            : "这一片里新出现 ${diff.addedCount} 部";
+        if (diff.updatedCount > 0) {
+          text = "$text, 你看过的 ${diff.updatedCount} 部有更新";
+        }
+        subtitle = text.tl;
+      }
+    } else {
+      title = "上次看到第 ${old.page} 页".tl;
+      if (old.totalPages > 0) {
+        subtitle = "站点当时共 ${old.totalPages} 页".tl;
+      }
+    }
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.fromLTRB(12, 8, 4, 4),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primaryContainer.withOpacity(0.4),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.history, size: 18, color: theme.colorScheme.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(title,
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w500)),
+                if (subtitle != null)
+                  Text(subtitle,
+                      style: TextStyle(
+                          fontSize: 12, color: theme.colorScheme.outline)),
+              ],
+            ),
+          ),
+          if (!done)
+            TextButton(
+              onPressed: anchorJumping ? null : _jumpToAnchor,
+              child: Text("跳到第 ${old.page} 页".tl),
+            ),
+          TextButton(
+            onPressed: () => setState(() {
+              anchorDismissed = true;
+              _anchorFloor = 0;
+            }),
+            child: Text(done ? "知道了".tl : "从头看".tl),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -112,7 +325,9 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
               category: widget.category,
               options: optionsValue,
               param: widget.param,
-              header: buildOptions(),
+              header: buildOptions(
+                  extra: [if (_showAnchorBanner) buildAnchorBanner()]),
+              onLogicUpdate: _recordAnchor,
               sourceKey: ComicSource.sources
                   .firstWhere((e) => e.categoryData?.key == widget.categoryKey)
                   .key,
@@ -184,7 +399,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
     return children;
   }
 
-  Widget buildOptions() {
+  Widget buildOptions({List<Widget> extra = const []}) {
     List<Widget> children = [];
     children.addAll(buildGroupChips());
     for (var optionList in options) {
@@ -209,7 +424,12 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [...children, const Divider()],
+        children: [
+          ...children,
+          ...extra,
+          if (extra.isNotEmpty) const SizedBox(height: 8),
+          const Divider(),
+        ],
       ).paddingLeft(8).paddingRight(8),
     );
   }
@@ -225,6 +445,7 @@ class _CategoryComicsList extends ComicsPage<BaseComic> {
     required this.header,
     required this.sourceKey,
     required this.signature,
+    this.onLogicUpdate,
   });
 
   final CategoryComicsLoader loader;
@@ -237,6 +458,10 @@ class _CategoryComicsList extends ComicsPage<BaseComic> {
 
   /// 多维度筛选项的签名, 用来区分同一分组下不同的筛选组合(状态缓存与 key)
   final String signature;
+
+  /// 列表每次重建时把 logic 交给页面, 用于记录浏览位置
+  @override
+  final void Function(ComicsPageLogic<BaseComic> logic)? onLogicUpdate;
 
   @override
   final String sourceKey;
