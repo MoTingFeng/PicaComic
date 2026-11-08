@@ -47,7 +47,7 @@ class ReadPositionStore {
           if (ep == null) continue;
           if (e.value is num) eps[ep] = (e.value as num).toInt();
         }
-        if (eps.isNotEmpty) _data[e.key.toString()] = eps;
+        if (eps.isNotEmpty) _data[entry.key.toString()] = eps;
       }
     } catch (_) {
       _data.clear();
