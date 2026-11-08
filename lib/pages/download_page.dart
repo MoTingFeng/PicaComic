@@ -1171,11 +1171,57 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
   /// 每一话各自停在第几页
   Map<int, int> epPages = const {};
 
+  /// 每一话的总页数(只有已下载的话能直接数出来)
+  Map<int, int> epTotals = {};
+
+  bool _totalsLoading = false;
+
+  bool _totalsLoaded = false;
+
   void loadProgress() {
     var target = downloadHistoryTarget(comic);
     if (target == null) return;
     history = HistoryManager().findSync(target);
     epPages = ReadPositionStore.instance.pagesOf(target);
+  }
+
+  /// 数一下每个已下载章节有几页, 好显示「3/12」这种进度
+  void loadEpTotals() {
+    if (_totalsLoaded || _totalsLoading) return;
+    _totalsLoading = true;
+    var id = comic.id;
+    var eps = List<int>.from(downloadedEps);
+    Future(() async {
+      var result = <int, int>{};
+      for (final i in eps) {
+        try {
+          var length = await DownloadManager().getEpLength(id, i + 1);
+          if (length > 0) result[i + 1] = length;
+        } catch (_) {
+          // 目录不存在等情况下跳过, 只是不显示总页数
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        epTotals = result;
+        _totalsLoading = false;
+        _totalsLoaded = true;
+      });
+    });
+  }
+
+  /// 章节格子上的进度文案: 「看到 3/12」「上次读到 3/12」「共 12 页」
+  String? epProgressLabel(int index) {
+    var ep = index + 1;
+    var isLast = history?.ep == ep;
+    var page = epPages[ep] ?? (isLast ? history?.page : null);
+    var total = epTotals[ep] ?? (isLast ? history?.maxPage : null);
+    if (total != null && total <= 0) total = null;
+    if (page == null || page <= 0) {
+      return total == null ? null : "共 $total 页".tl;
+    }
+    var progress = total == null ? "第 $page 页" : "$page/$total";
+    return isLast ? "上次读到 $progress".tl : "看到 $progress".tl;
   }
 
   /// 「阅读」按钮上的文案: 没读过就是开始阅读, 读过就写明续到哪
@@ -1193,6 +1239,8 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
     showConfirmDialog(context, "确认删除".tl, "要删除这个章节吗".tl, () async {
       var message = await DownloadManager().deleteEpisode(comic, i);
       if (message == null) {
+        _totalsLoaded = false;
+        epTotals = {};
         setState(() {});
       } else {
         showToast(message: message);
@@ -1204,6 +1252,7 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
   Widget build(BuildContext context) {
     getInfo();
     loadProgress();
+    loadEpTotals();
     return Padding(
       padding: const EdgeInsets.only(left: 16, right: 16),
       child: Column(
@@ -1252,13 +1301,9 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
-                                if (epPages[i + 1] != null ||
-                                    history?.ep == i + 1)
+                                if (epProgressLabel(i) != null)
                                   Text(
-                                    history?.ep == i + 1
-                                        ? "上次读到 · 第 ${epPages[i + 1] ?? history?.page} 页"
-                                            .tl
-                                        : "看到第 ${epPages[i + 1]} 页".tl,
+                                    epProgressLabel(i)!,
                                     style: TextStyle(
                                       fontSize: 11,
                                       color:
