@@ -122,6 +122,9 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
 
   int? anchorJumpPage;
 
+  /// 正在拉「新增」条目(旧到新排序下点按钮时才拉)
+  bool anchorFetchingNew = false;
+
   String get _sortValue => optionsValue.isEmpty ? "" : optionsValue.first;
 
   String get _anchorSourceKey {
@@ -224,6 +227,92 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
     }
   }
 
+  /// 看看新增了啥: 排序会漂移的列表直接在内存里筛, 旧到新排序才去拉
+  Future<void> _showNewComics() async {
+    var old = anchor;
+    if (old == null || anchorFetchingNew) return;
+    List<BaseComic> items;
+    var restPages = 0;
+    if (_sortValue == "da") {
+      var logic =
+          StateController.findOrNull<ComicsPageLogic<BaseComic>>(tag: _listTag);
+      var basePage = old.totalPages > 0 ? old.totalPages : (logic?.current ?? 1);
+      var total = logic?.maxPage ?? basePage;
+      setState(() => anchorFetchingNew = true);
+      var fetched = <BaseComic>[];
+      var pages = 0;
+      // 最多补 3 页, 隔太久没来的情况不可能全拉
+      for (var page = basePage + 1;
+          page <= total && pages < 3 && mounted;
+          page++) {
+        var res = await _pageLoader(page);
+        if (res.error || res.data.isEmpty) break;
+        fetched.addAll(res.data);
+        pages++;
+      }
+      if (!mounted) return;
+      setState(() => anchorFetchingNew = false);
+      items = fetched;
+      restPages = total - (basePage + pages);
+      if (restPages < 0) restPages = 0;
+    } else {
+      items = anchorDiff?.newComics ?? const [];
+    }
+    if (!mounted) return;
+    if (items.isEmpty) {
+      showToast(message: "没有拉到新增内容".tl);
+      return;
+    }
+    _openNewComicsSheet(items, restPages);
+  }
+
+  void _openNewComicsSheet(List<BaseComic> items, int restPages) {
+    var theme = Theme.of(context);
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.92,
+        builder: (context, controller) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+              child: Text(
+                "上次之后新增的 ${items.length} 部".tl,
+                style: const TextStyle(
+                    fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                restPages > 0
+                    ? "还有 $restPages 页没拉, 想看更多就继续往下翻".tl
+                    : "点封面可以看详情".tl,
+                style: TextStyle(
+                    fontSize: 12, color: theme.colorScheme.outline),
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: GridView.builder(
+                controller: controller,
+                padding: const EdgeInsets.all(8),
+                gridDelegate: SliverGridDelegateWithComics(),
+                itemCount: items.length,
+                itemBuilder: (context, i) =>
+                    buildComicTile(context, items[i], _anchorSourceKey),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// 是否展示「上次看到第几页」提示条; 切换筛选/子分类后不提示(记录照旧)
   bool get _showAnchorBanner =>
       _anchorEnabled &&
@@ -295,6 +384,11 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
             TextButton(
               onPressed: anchorJumping ? null : _jumpToAnchor,
               child: Text("跳到第 ${old.page} 页".tl),
+            )
+          else if (diff != null && !diff.isEmpty)
+            TextButton(
+              onPressed: anchorFetchingNew ? null : _showNewComics,
+              child: Text(anchorFetchingNew ? "拉取中".tl : "看看新增了啥".tl),
             ),
           TextButton(
             onPressed: () => setState(() {

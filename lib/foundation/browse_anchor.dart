@@ -182,6 +182,10 @@ class AnchorDiff {
   /// [addedCount] 是否由总页数差估算得来
   bool fromPageDiff;
 
+  /// 已加载范围里新出现的条目(排序会漂移的列表可以直接列出来);
+  /// 旧到新排序下新增都在这之后, 这里为空, 需要另外去拉
+  final List<BaseComic> newComics = [];
+
   bool get isEmpty => addedPages == 0 && addedCount == 0 && updatedCount == 0;
 }
 
@@ -223,7 +227,10 @@ AnchorDiff computeAnchorDiff({
     }
   } else {
     for (final comic in loaded) {
-      if (!old.items.containsKey(comic.id)) diff.addedCount++;
+      if (!old.items.containsKey(comic.id)) {
+        diff.addedCount++;
+        diff.newComics.add(comic);
+      }
     }
   }
   return diff;
