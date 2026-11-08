@@ -32,6 +32,7 @@ import 'package:pica_comic/pages/comic_page.dart';
 import 'package:pica_comic/tools/keep_screen_on.dart';
 import 'package:pica_comic/foundation/image_manager.dart';
 import 'package:pica_comic/foundation/history.dart';
+import 'package:pica_comic/foundation/read_positions.dart';
 import 'package:pica_comic/tools/save_image.dart';
 import 'package:pica_comic/tools/time.dart';
 import 'package:pica_comic/network/jm_network/jm_network.dart';
@@ -70,63 +71,77 @@ class ComicReadingPage extends StatelessWidget {
 
   late final History? history = HistoryManager().findSync(readingData.id);
 
-  final int initialPage;
+  /// 实际起读页: 调用方给的值, 若这一话有单独记录则以记录为准
+  late final int initialPage;
+
+  /// 这一话上次停在哪一页就以哪一页起读, 否则用调用方给的值
+  int _resolveInitialPage(int given) {
+    if (readingData.hasEp) {
+      var saved = ReadPositionStore.instance.pageOf(readingData.id, initialEp);
+      if (saved != null && saved > 0) return saved;
+    }
+    return given <= 0 ? 1 : given;
+  }
 
   final int initialEp;
 
   ReadingType get type => readingData.type;
 
-  ComicReadingPage(this.readingData, this.initialPage, this.initialEp,
+  ComicReadingPage(this.readingData, int initialPage, this.initialEp,
       {super.key}) {
+    this.initialPage = _resolveInitialPage(initialPage);
     StateController.put(ComicReadingPageLogic(
         initialEp,
         readingData,
-        initialPage,
+        this.initialPage,
         () => _updateHistory(
             StateController.find<ComicReadingPageLogic>(), false)));
   }
 
   ComicReadingPage.picacg(
       String target, this.initialEp, List<String> eps, String title,
-      {super.key, this.initialPage = 1})
+      {super.key, int initialPage = 1})
       : readingData = PicacgReadingData(title, target, eps) {
+    this.initialPage = _resolveInitialPage(initialPage);
     StateController.put(ComicReadingPageLogic(
         initialEp,
         readingData,
-        initialPage,
+        this.initialPage,
         () => _updateHistory(
             StateController.find<ComicReadingPageLogic>(), false)));
   }
 
-  ComicReadingPage.ehentai(Gallery gallery, {super.key, this.initialPage = 1})
+  ComicReadingPage.ehentai(Gallery gallery, {super.key, int initialPage = 1})
       : initialEp = 1,
         readingData = EhReadingData(gallery) {
+    this.initialPage = _resolveInitialPage(initialPage);
     StateController.put(ComicReadingPageLogic(
         1,
         readingData,
-        initialPage,
+        this.initialPage,
         () => _updateHistory(
             StateController.find<ComicReadingPageLogic>(), false)));
   }
 
   ComicReadingPage.jmComic(JmComicInfo comic, this.initialEp,
-      {super.key, this.initialPage = 1})
+      {super.key, int initialPage = 1})
       : readingData = JmReadingData(
           comic.name,
           comic.id,
           comic.series.values.toList(),
           comic.epNames,
         ) {
+    this.initialPage = _resolveInitialPage(initialPage);
     StateController.put(ComicReadingPageLogic(
         initialEp,
         readingData,
-        initialPage,
+        this.initialPage,
         () => _updateHistory(
             StateController.find<ComicReadingPageLogic>(), false)));
   }
 
   ComicReadingPage.hitomi(HitomiComic comic, String link,
-      {super.key, this.initialPage = 1})
+      {super.key, int initialPage = 1})
       : initialEp = 1,
         readingData = HitomiReadingData(
           comic.title,
@@ -134,34 +149,37 @@ class ComicReadingPage extends StatelessWidget {
           comic.files,
           link,
         ) {
+    this.initialPage = _resolveInitialPage(initialPage);
     StateController.put(ComicReadingPageLogic(
         initialEp,
         readingData,
-        initialPage,
+        this.initialPage,
         () => _updateHistory(
             StateController.find<ComicReadingPageLogic>(), false)));
   }
 
   ComicReadingPage.htmanga(String target, String title,
-      {super.key, this.initialPage = 1})
+      {super.key, int initialPage = 1})
       : initialEp = 1,
         readingData = HtReadingData(title, target) {
+    this.initialPage = _resolveInitialPage(initialPage);
     StateController.put(ComicReadingPageLogic(
         initialEp,
         readingData,
-        initialPage,
+        this.initialPage,
         () => _updateHistory(
             StateController.find<ComicReadingPageLogic>(), false)));
   }
 
   ComicReadingPage.nhentai(String target, String title,
-      {super.key, this.initialPage = 1})
+      {super.key, int initialPage = 1})
       : initialEp = 1,
         readingData = NhentaiReadingData(title, target) {
+    this.initialPage = _resolveInitialPage(initialPage);
     StateController.put(ComicReadingPageLogic(
         initialEp,
         readingData,
-        initialPage,
+        this.initialPage,
         () => _updateHistory(
             StateController.find<ComicReadingPageLogic>(), false)));
   }
@@ -189,6 +207,10 @@ class ComicReadingPage extends StatelessWidget {
         history?.ep = 1;
         history?.page = logic.index;
       }
+    }
+    // 顺便记下这一话停在第几页, 下次点这一话直接续到这一页
+    if (readingData.hasEp && logic != null) {
+      ReadPositionStore.instance.save(readingData.id, logic.order, logic.index);
     }
     history!.maxPage = logic.length;
     HistoryManager().saveReadHistory(history!, updateMePage);

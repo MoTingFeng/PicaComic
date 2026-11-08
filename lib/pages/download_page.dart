@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:pica_comic/base.dart';
 import 'package:pica_comic/comic_source/comic_source.dart';
 import 'package:pica_comic/foundation/history.dart';
+import 'package:pica_comic/foundation/read_positions.dart';
 import 'package:pica_comic/network/app_dio.dart';
 import 'package:pica_comic/network/base_comic.dart';
 import 'package:pica_comic/network/custom_download_model.dart';
@@ -39,6 +40,28 @@ import 'htmanga/ht_comic_page.dart';
 
 ///已下载条目的源标识: 内置源取 DownloadType 名, 自定义源取真实 sourceKey
 String _sourceKeyOf(DownloadedItem item) => item.sourceKey ?? item.type.name;
+
+/// 已下载条目对应的阅读历史键(与历史记录里存的 target 一致), 拿不到返回 null
+String? downloadHistoryTarget(DownloadedItem item) {
+  switch (item.type) {
+    case DownloadType.picacg:
+      return (item as DownloadedComic).comicItem.id;
+    case DownloadType.ehentai:
+      return (item as DownloadedGallery).gallery.link;
+    case DownloadType.jm:
+      return item.id.startsWith('jm') ? item.id.substring(2) : null;
+    case DownloadType.hitomi:
+      return (item as DownloadedHitomiComic).comic.id;
+    case DownloadType.htmanga:
+      return item.id.startsWith('Ht') ? item.id.substring(2) : null;
+    case DownloadType.nhentai:
+      return item.id.startsWith('nhentai') ? item.id.substring(7) : item.id;
+    case DownloadType.other:
+      return (item as CustomDownloadedItem).comicId;
+    default:
+      return null;
+  }
+}
 
 extension ReadComic on DownloadedItem {
   void read({int? ep}) async {
@@ -533,28 +556,8 @@ class DownloadPage extends StatelessWidget {
   /// 把下载条目还原成写历史记录时用的 target:
   /// 与 ReadComic.read / History.findOrCreate 的键保持一致, 才能点亮
   /// ComicTile 上的阅读位置角标。
-  String? _historyTargetOf(DownloadedItem item) {
-    switch (item.type) {
-      case DownloadType.picacg:
-        return (item as DownloadedComic).comicItem.id;
-      case DownloadType.ehentai:
-        return (item as DownloadedGallery).gallery.link;
-      case DownloadType.jm:
-        return item.id.startsWith('jm') ? item.id.substring(2) : null;
-      case DownloadType.hitomi:
-        return (item as DownloadedHitomiComic).comic.id;
-      case DownloadType.htmanga:
-        return item.id.startsWith('Ht') ? item.id.substring(2) : null;
-      case DownloadType.nhentai:
-        return item.id.startsWith('nhentai')
-            ? item.id.substring(7)
-            : item.id;
-      case DownloadType.other:
-        return (item as CustomDownloadedItem).comicId;
-      default:
-        return null;
-    }
-  }
+  String? _historyTargetOf(DownloadedItem item) =>
+      downloadHistoryTarget(item);
 
   Widget buildItem(BuildContext context, DownloadPageLogic logic, int index) {
     bool selected = logic.selected[index];
@@ -1162,6 +1165,30 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
   List<int> downloadedEps = [];
   late final comic = widget.item;
 
+  /// 这个作品的历史(上次读到哪一话哪一页)
+  History? history;
+
+  /// 每一话各自停在第几页
+  Map<int, int> epPages = const {};
+
+  void loadProgress() {
+    var target = downloadHistoryTarget(comic);
+    if (target == null) return;
+    history = HistoryManager().findSync(target);
+    epPages = ReadPositionStore.instance.pagesOf(target);
+  }
+
+  /// 「阅读」按钮上的文案: 没读过就是开始阅读, 读过就写明续到哪
+  String readLabel() {
+    var h = history;
+    if (h == null || h.ep <= 0) return "开始阅读".tl;
+    var ep = h.ep;
+    var epName = ep <= eps.length ? eps[ep - 1] : "$ep";
+    var page = epPages[ep] ?? h.page;
+    if (page <= 0) return "继续阅读 · $epName".tl;
+    return "继续阅读 · $epName · 第 $page 页".tl;
+  }
+
   deleteEpisode(int i) {
     showConfirmDialog(context, "确认删除".tl, "要删除这个章节吗".tl, () async {
       var message = await DownloadManager().deleteEpisode(comic, i);
@@ -1176,6 +1203,7 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
   @override
   Widget build(BuildContext context) {
     getInfo();
+    loadProgress();
     return Padding(
       padding: const EdgeInsets.only(left: 16, right: 16),
       child: Column(
@@ -1215,8 +1243,29 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
                             width: 16,
                           ),
                           Expanded(
-                            child: Text(
-                              eps[i],
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  eps[i],
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                if (epPages[i + 1] != null ||
+                                    history?.ep == i + 1)
+                                  Text(
+                                    history?.ep == i + 1
+                                        ? "上次读到 · 第 ${epPages[i + 1] ?? history?.page} 页"
+                                            .tl
+                                        : "看到第 ${epPages[i + 1]} 页".tl,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color:
+                                          Theme.of(context).colorScheme.primary,
+                                    ),
+                                  ),
+                              ],
                             ),
                           ),
                           const SizedBox(
@@ -1260,7 +1309,7 @@ class _DownloadedComicInfoViewState extends State<DownloadedComicInfoView> {
                   ),
                   Expanded(
                     child: FilledButton(
-                        onPressed: () => read(), child: Text("阅读".tl)),
+                        onPressed: () => read(), child: Text(readLabel())),
                   ),
                 ],
               )),
