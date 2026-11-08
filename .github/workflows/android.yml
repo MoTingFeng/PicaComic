@@ -76,9 +76,14 @@ jobs:
           # 基数必须大于历史上发布过的任何 versionCode, 否则会被系统判定为降级而拒绝安装。
           BASE=$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//; s/.*+//')
           BUILD_NUMBER=$((BASE + GITHUB_RUN_NUMBER))
+          # App 内「关于」页显示的版本号也来自 pubspec, 通过 dart-define 注入,
+          # 免得 lib/foundation/def.dart 里的常量再和发版脱钩
+          APP_VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//; s/+.*//')"
           echo "versionCode = $BUILD_NUMBER (base $BASE + run $GITHUB_RUN_NUMBER)"
+          echo "versionName = $APP_VERSION"
           flutter build apk --release \
-            --build-number=$BUILD_NUMBER
+            --build-number=$BUILD_NUMBER \
+            --dart-define=APP_VERSION=$APP_VERSION
 
       - name: Rename APKs with version
         run: |

@@ -40,6 +40,8 @@
 3. 提交并推送 `master`
 4. GitHub Actions 自动构建 → 发布到**该版本自己的 Release**（tag 形如 **`v4.6.2-mod`**）；
    同一个版本重复构建会追加到同一个 Release，各历史版本互相独立、不会被覆盖
+   > App 内「关于」页显示的版本号由 CI 用 `--dart-define=APP_VERSION` 注入 `pubspec.yaml` 的版本名，
+   > 和发版同一处来源，不需要再手改 `lib/foundation/def.dart`（那里的 defaultValue 只给本地 flutter run 兜底）
 5. 手机端**覆盖安装**即可（包名与签名固定，数据保留）
 
 ## 版本代号对照
