@@ -441,6 +441,41 @@ class _SettingsPageState extends State<SettingsPage> implements PopEntry{
         ],
       );
 
+  /// 设置「日志上报邮箱」。地址只存在本机设置里, App 内不写死任何邮箱,
+  /// 别人拿到安装包也改不了发给谁; 留空则日志页的发信入口只提示去设置。
+  void setLogEmail() {
+    var controller = TextEditingController(text: appdata.settings[91]);
+    showDialog(
+      context: App.globalContext!,
+      useSafeArea: false,
+      builder: (context) => ContentDialog(
+        title: "日志上报邮箱".tl,
+        content: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: TextField(
+            controller: controller,
+            keyboardType: TextInputType.emailAddress,
+            decoration: InputDecoration(
+              border: const OutlineInputBorder(),
+              hintText: "收件人邮箱".tl,
+            ),
+          ),
+        ),
+        actions: [
+          Button.filled(
+            child: Text("确认".tl),
+            onPressed: () {
+              appdata.settings[91] = controller.text.trim();
+              appdata.updateSettings();
+              setState(() {});
+              App.globalBack();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget buildAppSettings() {
     return Column(
       children: [
@@ -452,6 +487,14 @@ class _SettingsPageState extends State<SettingsPage> implements PopEntry{
           title: const Text("Logs"),
           trailing: const Icon(Icons.arrow_right),
           onTap: () => context.to(() => const LogsPage()),
+        ),
+        ListTile(
+          leading: const Icon(Icons.alternate_email),
+          title: Text("日志上报邮箱".tl),
+          subtitle: Text(appdata.settings[91].isEmpty
+              ? "日志页「发送到邮箱」的收件人, 留空则无法发送".tl
+              : appdata.settings[91]),
+          onTap: setLogEmail,
         ),
         ListTile(
           title: Text("更新".tl),

@@ -1,6 +1,13 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_email_sender/flutter_email_sender.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pica_comic/base.dart';
+import 'package:pica_comic/foundation/def.dart';
 import 'package:pica_comic/foundation/log.dart';
+import 'package:pica_comic/network/download.dart';
 import 'package:pica_comic/tools/io_tools.dart';
 import 'package:pica_comic/tools/translations.dart';
 import 'package:pica_comic/components/components.dart';
@@ -41,6 +48,10 @@ class _LogsPageState extends State<LogsPage> {
               PopupMenuItem(
                 child: Text("导出".tl),
                 onTap: () => saveLog(LogManager().toString()),
+              ),
+              PopupMenuItem(
+                child: Text("发送到邮箱".tl),
+                onTap: () => sendLogByEmail(),
               ),
             ]);
           }), icon: const Icon(Icons.more_horiz))
@@ -103,4 +114,86 @@ class _LogsPageState extends State<LogsPage> {
       ),
     );
   }
+}
+
+/// 把本次运行的日志当附件, 交给手机上的邮件 App 发送。
+///
+/// 收件地址取自 settings[91], 只存在用户本机, App 内不写死任何邮箱:
+/// 留空就不让发, 别人拿到安装包也没法把日志发到别处。
+Future<void> sendLogByEmail() async {
+  var to = appdata.settings[91].trim();
+  if (to.isEmpty) {
+    showToast(message: "先到「设置 → APP → 日志上报邮箱」填写收件地址".tl);
+    return;
+  }
+  try {
+    var attachment = await _prepareLogAttachment();
+    // 带附件时只会列出邮件类 App(QQ邮箱/Outlook/Gmail 等), 收件人与附件都已填好,
+    // 用户确认发送即可
+    await FlutterEmailSender.send(Email(
+      recipients: [to],
+      subject: "[PicaComic] $appVersion ${_logTimestamp()}",
+      body: _logMailBody(),
+      attachmentPaths: [attachment],
+    ));
+  } catch (e) {
+    LogManager.addLog(LogLevel.error, "Email", "发送日志失败: $e");
+    showToast(message: "${"发送失败".tl}: $e");
+  }
+}
+
+/// 准备要发出去的日志文件, 返回它的路径。
+///
+/// 优先用启动时落盘的 log.txt(本次运行的完整日志, 不受内存 500 条上限影响);
+/// 没有落盘日志的平台(iOS)退回内存里的日志。
+Future<String> _prepareLogAttachment() async {
+  var dir = await getTemporaryDirectory();
+  var path = "${dir.path}$pathSep${_logFileName()}";
+  var src = LogManager.logFile;
+  if (src != null && src.existsSync()) {
+    await src.copy(path);
+  } else {
+    await File(path).writeAsString(LogManager().toString());
+  }
+  return path;
+}
+
+String _logFileName() => "pica-log-${_logTimestamp()}.txt";
+
+String _logTimestamp([DateTime? time]) {
+  var t = time ?? DateTime.now();
+  String two(int v) => v.toString().padLeft(2, "0");
+  return "${t.year}${two(t.month)}${two(t.day)}-"
+      "${two(t.hour)}${two(t.minute)}${two(t.second)}";
+}
+
+/// 邮件正文: 版本/系统/时间/下载队列现状, 邮件里就能看出运行环境, 不必再回头问
+String _logMailBody() {
+  var t = DateTime.now();
+  String two(int v) => v.toString().padLeft(2, "0");
+  var lines = <String>[
+    "版本: $appVersion",
+    "系统: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}",
+    "时间: ${t.year}-${two(t.month)}-${two(t.day)} "
+        "${two(t.hour)}:${two(t.minute)}:${two(t.second)}",
+  ];
+  try {
+    var manager = DownloadManager();
+    var tasks = manager.downloading;
+    lines.add("下载队列: ${tasks.length} 本${manager.isDownloading ? "(进行中)" : "(未在下载)"}");
+    var shown = 0;
+    for (var task in tasks) {
+      if (shown >= 20) break;
+      lines.add("  - ${task.id}: ${task.downloadedPages}/${task.totalPages}");
+      shown++;
+    }
+    if (tasks.length > shown) {
+      lines.add("  ... 另有 ${tasks.length - shown} 本");
+    }
+  } catch (e) {
+    lines.add("下载队列: 读取失败 $e");
+  }
+  lines.add("");
+  lines.add("完整日志见附件。");
+  return lines.join("\n");
 }
