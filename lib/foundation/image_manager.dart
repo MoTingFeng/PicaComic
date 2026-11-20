@@ -166,6 +166,8 @@ class ImageManager {
     String url,
     File file, {
     Map<String, String>? headers,
+    String? method,
+    Object? data,
     void Function(int bytes)? onProgress,
     bool Function()? isCanceled,
   }) async {
@@ -179,9 +181,12 @@ class ImageManager {
       if (url.contains("s.exhentai.org")) {
         realUrl = url.replaceFirst("s.exhentai.org", "ehgt.org");
       }
-      var res = await dio.get<ResponseBody>(realUrl,
-          options:
-              Options(responseType: ResponseType.stream, headers: headers));
+      var res = await dio.request<ResponseBody>(realUrl,
+          data: data,
+          options: Options(
+              method: method ?? "GET",
+              responseType: ResponseType.stream,
+              headers: headers));
       if (res.data == null) {
         throw Exception("Empty Data");
       }

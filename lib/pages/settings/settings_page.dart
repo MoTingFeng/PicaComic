@@ -613,12 +613,27 @@ class _SettingsPageState extends State<SettingsPage> implements PopEntry{
         ),
         ListTile(
           title: Text("下载并行".tl),
+          subtitle: Text("每个下载任务同时下几张图".tl),
           leading: const Icon(Icons.download),
           trailing: Select(
             initialValue: ["1", "2", "4", "6", "8", "16"].indexOf(appdata.settings[79]),
             values: const ["1", "2", "4", "6", "8", "16"],
             onChange: (value) {
               appdata.settings[79] = ["1", "2", "4", "6", "8", "16"][value];
+              appdata.updateSettings();
+            },
+          ),
+        ),
+        ListTile(
+          title: Text("同时下载图片上限".tl),
+          subtitle: Text("所有任务加起来最多同时下几张, 避免内存翻倍".tl),
+          leading: const Icon(Icons.speed),
+          trailing: Select(
+            initialValue: ["4", "8", "12", "16", "24", "0"]
+                .indexOf(appdata.settings[92]),
+            values: const ["4", "8", "12", "16", "24", "0"],
+            onChange: (value) {
+              appdata.settings[92] = ["4", "8", "12", "16", "24", "0"][value];
               appdata.updateSettings();
             },
           ),

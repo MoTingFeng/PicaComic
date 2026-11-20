@@ -82,7 +82,7 @@ class NhentaiDownloadingItem extends DownloadingItem {
   }
 
   @override
-  bool get streamToFile => true;
+  bool canStreamImage(String link) => true;
 
   @override
   Future<String> downloadImageToFile(String link, File file,

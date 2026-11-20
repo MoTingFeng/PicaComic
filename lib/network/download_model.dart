@@ -204,7 +204,7 @@ abstract class DownloadingItem with _TransferSpeedMixin {
     var taskKey = "$ep$index";
     if (_downloading[taskKey] == null ||
         _downloading[taskKey]!.error != null) {
-      if (streamToFile) {
+      if (canStreamImage(link)) {
         // 流式: 边收边写 .part, 不占缓存、不缓冲整张图
         _downloading[taskKey] = _StreamImageTask(
           (task) => _streamImageToFile(link, downloadTo, basename, task),
@@ -288,6 +288,18 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   void _scheduleTasks(int ep, int index) {
     var urls = links![ep]!;
+    // 每个任务能用的并发 = min(设置里的每任务并发, 全局上限 / 活跃任务数)
+    var limit = allowedLoadingNumber;
+    var global = DownloadManager().imageConcurrencyLimit;
+    if (global > 0) {
+      var share = global ~/ DownloadManager().activeTaskCount;
+      if (share < 1) {
+        share = 1;
+      }
+      if (share < limit) {
+        limit = share;
+      }
+    }
     int downloading = 0;
     for (int i = index; i < urls.length; i++) {
       var task = _downloading["$ep$i"];
@@ -297,7 +309,7 @@ abstract class DownloadingItem with _TransferSpeedMixin {
       } else if (!task.isFinished) {
         downloading++;
       }
-      if (downloading >= allowedLoadingNumber) {
+      if (downloading >= limit) {
         break;
       }
     }
@@ -527,9 +539,10 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   Stream<DownloadProgress> downloadImage(String link);
 
-  /// 是否支持"边下边写目标文件"(不写缓存、不缓冲整张图)。
-  /// 覆写为 true 的源要同时实现 [downloadImageToFile]。
-  bool get streamToFile => false;
+  /// 这张图能否"边下边写目标文件"(不写缓存、不缓冲整张图)。
+  /// 覆写为 true 的源要同时实现 [downloadImageToFile];
+  /// 需要整张图做 JS 变换/重组的源返回 false, 沿用缓存+整图缓冲的老路径。
+  bool canStreamImage(String link) => false;
 
   /// 流式取图: 把 [link] 写到 [file] 并返回扩展名(不带点)。
   /// 只给 [streamToFile] 为 true 的源覆写; 其它源沿用缓存+整图缓冲的老路径。

@@ -297,6 +297,19 @@ class DownloadManager with _DownloadDb implements Listenable {
     _memoryTimer = null;
   }
 
+  /// 全局同时在飞的图片数上限(设置 92)。0 或无法解析表示不限制。
+  /// 以前是"每任务 6 张 × 任务数", 任务一多内存就翻倍, 这里按源数摊薄。
+  int get imageConcurrencyLimit {
+    var value = int.tryParse(appdata.settings[92]);
+    if (value == null || value <= 0) {
+      return 0;
+    }
+    return value;
+  }
+
+  /// 当前活跃的源/任务数, 供每个任务算自己那份并发额度
+  int get activeTaskCount => _activeTasks.isEmpty ? 1 : _activeTasks.length;
+
   /// 该任务是否是它所在源当前的活动任务
   bool isActive(DownloadingItem item) => _activeTasks[item.sourceKey] == item.id;
 
@@ -328,6 +341,9 @@ class DownloadManager with _DownloadDb implements Listenable {
       if (_activeTasks.containsKey(item.sourceKey)) continue;
       _activeTasks[item.sourceKey] = item.id;
       pending.add(item);
+    }
+    if (pending.isNotEmpty) {
+      _startMemorySampling();
     }
     for (var item in pending) {
       item.start();

@@ -129,9 +129,9 @@ Future<void> sendLogByEmail() async {
   }
   var subject = "[PicaComic] $appVersion ${_logTimestamp()}";
   var body = _logMailBody();
-  String attachment;
+  List<String> attachments;
   try {
-    attachment = await _prepareLogAttachment();
+    attachments = await _prepareLogAttachments();
   } catch (e) {
     showToast(message: "${"准备日志文件失败".tl}: $e");
     return;
@@ -143,7 +143,7 @@ Future<void> sendLogByEmail() async {
       recipients: [to],
       subject: subject,
       body: body,
-      attachmentPaths: [attachment],
+      attachmentPaths: attachments,
     ));
     return;
   } catch (e) {
@@ -153,7 +153,7 @@ Future<void> sendLogByEmail() async {
   // 走系统分享面板, 由用户挑任意 App 发送, 收件人写在正文里, 需要自己填
   try {
     await Share.shareXFiles(
-      [XFile(attachment)],
+      attachments.map((path) => XFile(path)).toList(),
       subject: subject,
       text: "${"收件人".tl}: $to\n\n$body",
     );
@@ -162,23 +162,41 @@ Future<void> sendLogByEmail() async {
   }
 }
 
-/// 准备要发出去的日志文件, 返回它的路径。
+/// 准备要发出去的日志文件, 返回它们的路径。
 ///
-/// 优先用启动时落盘的 log.txt(本次运行的完整日志, 不受内存 500 条上限影响);
-/// 没有落盘日志的平台(iOS)退回内存里的日志。
-Future<String> _prepareLogAttachment() async {
+/// 一次带三份: 当前这一轮 + 轮转保留的前两轮。
+/// 崩溃后重开 App, 崩溃那一轮的日志已经变成 log.txt.1,
+/// 只发 log.txt 会丢掉崩溃现场。
+Future<List<String>> _prepareLogAttachments() async {
   var dir = await getTemporaryDirectory();
-  var path = "${dir.path}$pathSep${_logFileName()}";
-  var src = LogManager.logFile;
-  if (src != null && src.existsSync()) {
-    await src.copy(path);
-  } else {
-    await File(path).writeAsString(LogManager().toString());
+  var result = <String>[];
+  var main = LogManager.logFile;
+  if (main != null && main.existsSync()) {
+    var sources = <(String, File)>[
+      ("current", main),
+      ("prev1", File("${main.path}.1")),
+      ("prev2", File("${main.path}.2")),
+    ];
+    for (var entry in sources) {
+      if (!entry.$2.existsSync()) {
+        continue;
+      }
+      var copy = File("${dir.path}$pathSep${_logFileName(entry.$1)}");
+      await entry.$2.copy(copy.path);
+      result.add(copy.path);
+    }
   }
-  return path;
+  if (result.isEmpty) {
+    // iOS 等没有落盘日志的平台: 退回内存里的日志
+    var path = "${dir.path}$pathSep${_logFileName("memory")}";
+    await File(path).writeAsString(LogManager().toString());
+    result.add(path);
+  }
+  return result;
 }
 
-String _logFileName() => "pica-log-${_logTimestamp()}.txt";
+String _logFileName([String label = "current"]) =>
+    "pica-log-$label-${_logTimestamp()}.txt";
 
 String _logTimestamp([DateTime? time]) {
   var t = time ?? DateTime.now();
@@ -214,6 +232,6 @@ String _logMailBody() {
     lines.add("下载队列: 读取失败 $e");
   }
   lines.add("");
-  lines.add("完整日志见附件。");
+  lines.add("附件: 当前日志 + 上次启动的日志(如有, 用于定位崩溃)。");
   return lines.join("\n");
 }

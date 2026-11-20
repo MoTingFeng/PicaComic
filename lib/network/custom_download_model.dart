@@ -127,6 +127,51 @@ class CustomDownloadingItem extends DownloadingItem {
     return ImageManager().getImage(url, null, false);
   }
 
+  /// 当前正在下的这一话对应的源章节 id
+  String get _currentChapterId {
+    var epIndex = _downloadEps.elementAtOrNull(downloadingEp);
+    return epIndex == null
+        ? comic.comicId
+        : (comic.chapters?.keys.elementAtOrNull(epIndex) ?? comic.comicId);
+  }
+
+  /// 没有 onResponse 变换的图可以直接流式写目标文件;
+  /// 需要 dart 侧改字节的(少数 JS 源)保留整图缓冲的老路径。
+  @override
+  bool canStreamImage(String link) {
+    if (source.getImageLoadingConfig == null) {
+      return true;
+    }
+    try {
+      var config =
+          source.getImageLoadingConfig!(link, comic.comicId, _currentChapterId);
+      return config['onResponse'] == null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<String> downloadImageToFile(String link, File file,
+      {void Function(int bytes)? onProgress,
+      bool Function()? isCanceled}) {
+    if (source.getImageLoadingConfig == null) {
+      return ImageManager().downloadToFile(link, file,
+          onProgress: onProgress, isCanceled: isCanceled);
+    }
+    var config =
+        source.getImageLoadingConfig!(link, comic.comicId, _currentChapterId);
+    return ImageManager().downloadToFile(
+      config["url"] ?? link,
+      file,
+      headers: Map<String, String>.from(
+          config['headers'] ?? {'user-agent': webUA}),
+      method: config['method'] as String?,
+      data: config['data'],
+      onProgress: onProgress,
+      isCanceled: isCanceled,
+    );
+  }
   @override
   Map<String, String> get headers => {
         "User-Agent": webUA,
