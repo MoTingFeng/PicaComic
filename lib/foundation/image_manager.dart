@@ -58,24 +58,29 @@ class ImageManager {
 
   /// 获取图片, 适用于没有任何限制的图片链接
   Stream<DownloadProgress> getImage(final String url,
-      [Map<String, String>? headers]) async* {
+      [Map<String, String>? headers, bool useCache = true]) async* {
     await wait(url);
     loadingItems[url] = DownloadProgress(0, 1, url, "");
     CachingFile? caching;
 
     try {
       final key = url;
-      var cache = await CacheManager().findCache(key);
-      if (cache != null) {
-        yield DownloadProgress(
-            1, 1, url, cache, null, CacheManager().getType(key));
-        loadingItems.remove(url);
-        return;
+      if (useCache) {
+        var cache = await CacheManager().findCache(key);
+        if (cache != null) {
+          yield DownloadProgress(
+              1, 1, url, cache, null, CacheManager().getType(key));
+          loadingItems.remove(url);
+          return;
+        }
       }
 
-      final cachingFile = await CacheManager().openWrite(key);
-      caching = cachingFile;
-      final savePath = cachingFile.file.path;
+      CachingFile? cachingFile;
+      if (useCache) {
+        cachingFile = await CacheManager().openWrite(key);
+        caching = cachingFile;
+      }
+      final savePath = cachingFile == null ? "" : cachingFile.file.path;
       yield DownloadProgress(0, 100, url, savePath);
       headers = headers ?? {};
       headers["User-Agent"] ??= webUA;
@@ -112,15 +117,21 @@ class ImageManager {
       }
       await for (var res in dioRes.data!.stream) {
         imageData.addAll(res);
-        await cachingFile.writeBytes(res);
+        if (cachingFile != null) {
+          await cachingFile.writeBytes(res);
+        }
         var progress = DownloadProgress(imageData.length,
             (expectedBytes ?? imageData.length + 1), url, savePath);
         yield progress;
         loadingItems[url] = progress;
       }
-      await cachingFile.close();
+      if (cachingFile != null) {
+        await cachingFile.close();
+      }
       var ext = getExt(dioRes);
-      CacheManager().setType(key, ext);
+      if (useCache) {
+        CacheManager().setType(key, ext);
+      }
       yield DownloadProgress(
         imageData.length,
         imageData.length,
@@ -144,6 +155,57 @@ class ImageManager {
         ehgtLoading--;
       }
       loadingItems.remove(url);
+    }
+  }
+
+  /// 下载专用: 把图片流直接写进 [file], 不缓冲整张图、也不写图片缓存。
+  ///
+  /// 返回扩展名(不带点)。[isCanceled] 返回 true 时中断并抛异常,
+  /// 调用方负责删掉写了一半的文件(通常用 .part + rename)。
+  Future<String> downloadToFile(
+    String url,
+    File file, {
+    Map<String, String>? headers,
+    void Function(int bytes)? onProgress,
+    bool Function()? isCanceled,
+  }) async {
+    var sink = file.openWrite();
+    var closed = false;
+    try {
+      headers = headers ?? {};
+      headers["User-Agent"] ??= webUA;
+      headers["Connection"] = "Keep-Alive";
+      var realUrl = url;
+      if (url.contains("s.exhentai.org")) {
+        realUrl = url.replaceFirst("s.exhentai.org", "ehgt.org");
+      }
+      var res = await dio.get<ResponseBody>(realUrl,
+          options:
+              Options(responseType: ResponseType.stream, headers: headers));
+      if (res.data == null) {
+        throw Exception("Empty Data");
+      }
+      var ext = getExt(res) ?? "jpg";
+      await for (var chunk in res.data!.stream) {
+        if (isCanceled?.call() ?? false) {
+          throw Exception("canceled");
+        }
+        sink.add(chunk);
+        onProgress?.call(chunk.length);
+      }
+      await sink.flush();
+      closed = true;
+      await sink.close();
+      return ext;
+    } catch (e) {
+      if (!closed) {
+        try {
+          await sink.close();
+        } catch (_) {
+          // 忽略: 关闭失败不影响把原始异常抛出去
+        }
+      }
+      rethrow;
     }
   }
 
@@ -622,16 +684,19 @@ class ImageManager {
   }
 
   Stream<DownloadProgress> getCustomImage(
-      String url, String comicId, String epId, String sourceKey) async* {
+      String url, String comicId, String epId, String sourceKey,
+      {bool useCache = true}) async* {
     var cacheKey = "$sourceKey$comicId$epId$url";
     await wait(cacheKey);
     loadingItems[cacheKey] = DownloadProgress(0, 1, cacheKey, "");
 
-    var cache = await CacheManager().findCache(cacheKey);
-    if (cache != null) {
-      yield DownloadProgress(1, 1, cacheKey, cache);
-      loadingItems.remove(cacheKey);
-      return;
+    if (useCache) {
+      var cache = await CacheManager().findCache(cacheKey);
+      if (cache != null) {
+        yield DownloadProgress(1, 1, cacheKey, cache);
+        loadingItems.remove(cacheKey);
+        return;
+      }
     }
 
     CachingFile? caching;
@@ -648,8 +713,10 @@ class ImageManager {
         config = source.getImageLoadingConfig!(url, comicId, epId);
       }
 
-      caching = await CacheManager().openWrite(cacheKey);
-      final savePath = caching.file.path;
+      if (useCache) {
+        caching = await CacheManager().openWrite(cacheKey);
+      }
+      final savePath = caching == null ? "" : caching.file.path;
 
       var res = await dio.request<ResponseBody>(config['url'] ?? url,
           data: config['data'],
@@ -668,7 +735,7 @@ class ImageManager {
       bool shouldModifyData = config['onResponse'] != null;
 
       await for (var data in res.data!.stream) {
-        if (!shouldModifyData) {
+        if (!shouldModifyData && caching != null) {
           await caching.writeBytes(data);
         }
         imageData.addAll(data);
@@ -694,12 +761,18 @@ class ImageManager {
               "Got: ${data.runtimeType}";
         }
         result = data;
-        await caching.writeBytes(data);
+        if (caching != null) {
+          await caching.writeBytes(data);
+        }
       }
 
       var ext = getExt(res);
-      CacheManager().setType(cacheKey, ext);
-      await caching.close();
+      if (useCache) {
+        CacheManager().setType(cacheKey, ext);
+      }
+      if (caching != null) {
+        await caching.close();
+      }
       var length = result?.length ?? imageData.length;
       yield DownloadProgress(
         length,

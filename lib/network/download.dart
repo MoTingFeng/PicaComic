@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -199,6 +200,7 @@ class DownloadManager with _DownloadDb implements Listenable {
   }
 
   void dispose() {
+    _stopMemorySampling();
     _runInit = false;
     downloading.forEach((e) => e.stop());
     downloading.clear();
@@ -264,12 +266,44 @@ class DownloadManager with _DownloadDb implements Listenable {
   /// 同一个源同时只跑一个任务(避免同源并发被风控), 不同源之间并行。
   final Map<String, String> _activeTasks = {};
 
+  /// 下载期间的内存采样: 每 5 秒把 RSS 写进日志。
+  /// 长时间下载若因 OOM 被杀, 日志里能看到内存是不是一路涨上去的。
+  Timer? _memoryTimer;
+
+  void _startMemorySampling() {
+    _memoryTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
+      var rss = 0;
+      var maxRss = 0;
+      try {
+        rss = ProcessInfo.currentRss;
+        maxRss = ProcessInfo.maxRss;
+      } catch (_) {
+        // 拿不到就记 0, 不影响下载
+      }
+      var images = 0;
+      for (var task in downloading) {
+        images += task.activeImages;
+      }
+      LogManager.addLog(
+          LogLevel.info,
+          "Memory",
+          "rss=${rss ~/ (1024 * 1024)}MB maxRss=${maxRss ~/ (1024 * 1024)}MB "
+              "tasks=${downloading.length} sources=${_activeTasks.length} images=$images");
+    });
+  }
+
+  void _stopMemorySampling() {
+    _memoryTimer?.cancel();
+    _memoryTimer = null;
+  }
+
   /// 该任务是否是它所在源当前的活动任务
   bool isActive(DownloadingItem item) => _activeTasks[item.sourceKey] == item.id;
 
   /// 启动任务并占住它所在源的槽
   void _startTask(DownloadingItem item) {
     _activeTasks[item.sourceKey] = item.id;
+    _startMemorySampling();
     item.start();
   }
 
@@ -359,6 +393,7 @@ class DownloadManager with _DownloadDb implements Listenable {
     if (_activeTasks.isEmpty) {
       //标记状态为未在下载
       isDownloading = false;
+      _stopMemorySampling();
       notifications.endProgress();
     }
   }
@@ -389,6 +424,7 @@ class DownloadManager with _DownloadDb implements Listenable {
   ///暂停下载(所有源的活动任务)
   void pause() {
     isDownloading = false;
+    _stopMemorySampling();
     for (var id in _activeTasks.values.toList()) {
       _findTask(id)?.pause();
     }

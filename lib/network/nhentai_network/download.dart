@@ -82,6 +82,17 @@ class NhentaiDownloadingItem extends DownloadingItem {
   }
 
   @override
+  bool get streamToFile => true;
+
+  @override
+  Future<String> downloadImageToFile(String link, File file,
+      {void Function(int bytes)? onProgress,
+      bool Function()? isCanceled}) {
+    return ImageManager().downloadToFile(link, file,
+        onProgress: onProgress, isCanceled: isCanceled);
+  }
+
+  @override
   String get title => comic.title;
 
   @override

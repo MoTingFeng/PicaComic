@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:pica_comic/foundation/image_manager.dart';
+import 'package:pica_comic/foundation/log.dart';
 import 'package:pica_comic/network/download_model.dart';
 import 'package:pica_comic/tools/extensions.dart';
 import 'package:pica_comic/tools/io_tools.dart';
@@ -95,19 +96,95 @@ class PicDownloadingItem extends DownloadingItem {
   @override
   String get title => comic.title;
 
+  /// 正在预取的话(数字是话号), 避免同一话重复请求
+  final _prefetching = <int>{};
+
+  @override
+  int get totalEps => _downloadEps.isEmpty ? 1 : _downloadEps.length;
+
   @override
   Future<Map<int, List<String>>> getLinks() async {
-    var res = <int, List<String>>{};
     _eps = (await network.getEps(id)).data;
-    for (var i in _downloadEps) {
-      res[i + 1] = (await network.getComicContent(id, i + 1)).data;
+    linkTotal = _downloadEps.length;
+    var res = <int, List<String>>{};
+    if (_downloadEps.isEmpty) {
+      return res;
     }
+    // 只取当前要下的这一话, 其余等 ensureEpLinks 按需取:
+    // 哔咔一本一百话, 全部预先取完就是一百次串行请求, 期间一张图都下不了。
+    var position = downloadingEp.clamp(0, _downloadEps.length - 1);
+    var ep = _downloadEps[position] + 1;
+    res[ep] = (await network.getComicContent(id, ep)).data;
+    linkDone = position + 1;
+    _prefetch(ep);
     return res;
+  }
+
+  @override
+  Future<int> ensureEpLinks(int position) async {
+    var pos = position.clamp(0, _downloadEps.length - 1);
+    var ep = _downloadEps[pos] + 1;
+    links ??= <int, List<String>>{};
+    if (links![ep] == null) {
+      links![ep] = (await network.getComicContent(id, ep)).data;
+    }
+    linkDone = pos + 1;
+    updateInfo?.call();
+    _prefetch(ep);
+    return ep;
+  }
+
+  /// 预取后面两话的图片地址, 让"取链接"和"下图片"重叠起来;
+  /// 预取失败不影响下载, 真下到那一话时会重新取。
+  void _prefetch(int currentEp) {
+    if (_downloadEps.isEmpty) {
+      return;
+    }
+    var current = _downloadEps.indexOf(currentEp - 1);
+    if (current < 0) {
+      return;
+    }
+    for (var step = 1; step <= 2; step++) {
+      var pos = current + step;
+      if (pos >= _downloadEps.length) {
+        return;
+      }
+      var ep = _downloadEps[pos] + 1;
+      if (links?[ep] != null || _prefetching.contains(ep)) {
+        continue;
+      }
+      unawaited(_prefetchOne(ep));
+    }
+  }
+
+  Future<void> _prefetchOne(int ep) async {
+    _prefetching.add(ep);
+    try {
+      var r = await network.getComicContent(id, ep);
+      links?[ep] = r.data;
+    } catch (e) {
+      LogManager.addLog(
+          LogLevel.warning, "Download", "预取第 $ep 话的图片地址失败: $e");
+    } finally {
+      _prefetching.remove(ep);
+      updateInfo?.call();
+    }
   }
 
   @override
   Stream<DownloadProgress> downloadImage(String link) {
     return ImageManager().getImage(getImageUrl(link));
+  }
+
+  @override
+  bool get streamToFile => true;
+
+  @override
+  Future<String> downloadImageToFile(String link, File file,
+      {void Function(int bytes)? onProgress,
+      bool Function()? isCanceled}) {
+    return ImageManager().downloadToFile(getImageUrl(link), file,
+        onProgress: onProgress, isCanceled: isCanceled);
   }
 
   @override

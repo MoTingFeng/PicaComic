@@ -84,6 +84,17 @@ class DownloadingHtComic extends DownloadingItem {
   }
 
   @override
+  bool get streamToFile => true;
+
+  @override
+  Future<String> downloadImageToFile(String link, File file,
+      {void Function(int bytes)? onProgress,
+      bool Function()? isCanceled}) {
+    return ImageManager().downloadToFile(link, file,
+        onProgress: onProgress, isCanceled: isCanceled);
+  }
+
+  @override
   Map<String, dynamic> toMap() =>
       {"comic": comic.toJson(), ...super.toBaseMap()};
 

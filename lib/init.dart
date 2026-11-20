@@ -44,10 +44,10 @@ Future<void> init() async {
     if(App.isIOS) {
       logFile = null;
     }
-    if(logFile?.existsSync() ?? false) {
-      await logFile?.delete();
-    }
     LogManager.logFile = logFile;
+    // 上一轮的日志轮转保留(log.txt -> log.txt.1 -> log.txt.2), 不再删除:
+    // 崩溃之后重开 App 还能从日志里看到崩溃那一轮发生了什么
+    LogManager.rotateOnStart();
     LogManager.addLog(LogLevel.info, "App Status", "Start initialization.");
     await appdata.readData();
     SingleInstanceCookieJar("${App.dataPath}/cookies.db");

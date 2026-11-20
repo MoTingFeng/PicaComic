@@ -120,10 +120,11 @@ class CustomDownloadingItem extends DownloadingItem {
           ? comic.comicId
           : (comic.chapters?.keys.elementAtOrNull(epIndex) ?? comic.comicId);
       var config = source.getImageLoadingConfig!(url, comic.comicId, chapterId);
-      return ImageManager()
-          .getImage(config["url"] ?? url, Map.from(config['headers'] ?? {}));
+      return ImageManager().getImage(
+          config["url"] ?? url, Map.from(config['headers'] ?? {}), false);
     }
-    return ImageManager().getImage(url);
+    // 下载不写图片缓存: 图片本来就要落盘到下载目录, 缓存那份纯属多写一遍
+    return ImageManager().getImage(url, null, false);
   }
 
   @override

@@ -182,7 +182,7 @@ abstract class DownloadingItem with _TransferSpeedMixin {
     }
   }
 
-  final _downloading = <String, _ImageDownloadWrapper>{};
+  final _downloading = <String, _ImageTask>{};
 
   /// 同一张图的连续失败次数。图片地址失效时源站会一直拒,
   /// 不设上限的话"失败→重建任务→再失败"会原地打转(日志刷屏, 任务永远不推进)。
@@ -201,38 +201,89 @@ abstract class DownloadingItem with _TransferSpeedMixin {
       downloadTo = path;
       basename = index.toString();
     }
-    if (_downloading["$ep$index"] == null ||
-        _downloading["$ep$index"]!.error != null) {
-      var taskKey = "$ep$index";
-      _downloading[taskKey] = _ImageDownloadWrapper(
-        downloadImage(link),
-        downloadTo,
-        basename,
-        onData,
-        () {
-          updateInfo?.call();
-          if (_downloading[taskKey]?.error != null) {
-            /// 4xx 说明地址本身不可用(多半是带签名的地址过期了), 原地重试没意义,
-            /// 直接停下来交给任务级重取地址
-            if (_isStaleLinkError(_downloading[taskKey]!.error!)) {
-              return;
-            }
-            var times = (_imageRetryTimes[taskKey] ?? 0) + 1;
-            _imageRetryTimes[taskKey] = times;
-            if (times > _maxImageRetry) {
-              /// 放弃原地重试, 等待中的 start() 会拿到这个错误并走任务级重试
-              return;
-            }
-            Future.delayed(Duration(milliseconds: 300 * times), () {
-              _scheduleTasks(ep, this.index);
-            });
-            return;
-          }
-          _imageRetryTimes.remove(taskKey);
-          _scheduleTasks(ep, this.index);
-        },
-      );
+    var taskKey = "$ep$index";
+    if (_downloading[taskKey] == null ||
+        _downloading[taskKey]!.error != null) {
+      if (streamToFile) {
+        // 流式: 边收边写 .part, 不占缓存、不缓冲整张图
+        _downloading[taskKey] = _StreamImageTask(
+          (task) => _streamImageToFile(link, downloadTo, basename, task),
+          onFinished: () => _onImageTaskDone(taskKey, ep),
+        );
+      } else {
+        _downloading[taskKey] = _ImageDownloadWrapper(
+          downloadImage(link),
+          downloadTo,
+          basename,
+          onData,
+          () => _onImageTaskDone(taskKey, ep),
+        );
+      }
     }
+  }
+
+  /// 一张图下载结束后的统一处理: 失败按次数退避重试, 4xx 交给任务级重取地址。
+  void _onImageTaskDone(String taskKey, int ep) {
+    updateInfo?.call();
+    var task = _downloading[taskKey];
+    if (task?.error != null) {
+      /// 4xx 说明地址本身不可用(多半是带签名的地址过期了), 原地重试没意义,
+      /// 直接停下来交给任务级重取地址
+      if (_isStaleLinkError(task!.error!)) {
+        return;
+      }
+      var times = (_imageRetryTimes[taskKey] ?? 0) + 1;
+      _imageRetryTimes[taskKey] = times;
+      if (times > _maxImageRetry) {
+        /// 放弃原地重试, 等待中的 start() 会拿到这个错误并走任务级重试
+        return;
+      }
+      Future.delayed(Duration(milliseconds: 300 * times), () {
+        _scheduleTasks(ep, index);
+      });
+      return;
+    }
+    _imageRetryTimes.remove(taskKey);
+    _scheduleTasks(ep, index);
+  }
+
+  /// 流式下载一张图: 先写 <目录>/<页码>.part, 收完再 rename 成 <页码>.<扩展名>。
+  /// 中途失败或取消只删 .part, 不会把半截文件当成"已下载"。
+  Future<void> _streamImageToFile(
+      String link, String dir, String basename, _StreamImageTask task) async {
+    var target = "$dir/$basename";
+    var part = File("$target.part");
+    if (await part.exists()) {
+      await part.delete();
+    }
+    await part.create(recursive: true);
+    String ext;
+    try {
+      ext = await downloadImageToFile(link, part,
+          onProgress: onData, isCanceled: () => task.canceled);
+    } catch (e) {
+      try {
+        if (await part.exists()) {
+          await part.delete();
+        }
+      } catch (_) {
+        // 删不掉就留着, 下次下载会覆盖
+      }
+      rethrow;
+    }
+    // 重新下载时清掉同一页其它扩展名的旧文件, 免得目录里同一页两份
+    for (var old in const ["jpg", "jpeg", "png", "gif", "webp"]) {
+      var file = File("$target.$old");
+      if (file.path != "$target.$ext" && await file.exists()) {
+        await file.delete();
+      }
+    }
+    // 重下同一页时目标文件可能已存在(Windows 上 rename 覆盖会失败, 先删掉)
+    var finalFile = File("$target.$ext");
+    if (await finalFile.exists()) {
+      await finalFile.delete();
+    }
+    await part.rename("$target.$ext");
   }
 
   void _scheduleTasks(int ep, int index) {
@@ -476,6 +527,18 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   Stream<DownloadProgress> downloadImage(String link);
 
+  /// 是否支持"边下边写目标文件"(不写缓存、不缓冲整张图)。
+  /// 覆写为 true 的源要同时实现 [downloadImageToFile]。
+  bool get streamToFile => false;
+
+  /// 流式取图: 把 [link] 写到 [file] 并返回扩展名(不带点)。
+  /// 只给 [streamToFile] 为 true 的源覆写; 其它源沿用缓存+整图缓冲的老路径。
+  Future<String> downloadImageToFile(String link, File file,
+      {void Function(int bytes)? onProgress,
+      bool Function()? isCanceled}) {
+    throw UnimplementedError("$runtimeType 不支持流式下载图片");
+  }
+
   ///获取封面链接
   String get cover;
 
@@ -490,6 +553,10 @@ abstract class DownloadingItem with _TransferSpeedMixin {
 
   ///已下载的图片数量
   int get downloadedPages => _downloadedNum;
+
+  ///当前这个任务在飞的图片数(内存观测用)
+  int get activeImages =>
+      _downloading.values.where((element) => !element.isFinished).length;
 
   ///标题
   String get title;
@@ -525,7 +592,7 @@ abstract class DownloadingItem with _TransferSpeedMixin {
   }
 }
 
-class _ImageDownloadWrapper {
+class _ImageDownloadWrapper implements _ImageTask {
   final Stream<DownloadProgress> stream;
 
   final String path;
@@ -607,14 +674,78 @@ class _ImageDownloadWrapper {
     }
   }
 
-  var completers = <Completer<_ImageDownloadWrapper>>[];
+  var completers = <Completer<_ImageTask>>[];
 
-  Future<_ImageDownloadWrapper> wait() {
+  @override
+  Future<_ImageTask> wait() {
     if (isFinished) {
       return Future.value(this);
     }
-    var completer = Completer<_ImageDownloadWrapper>();
+    var completer = Completer<_ImageTask>();
     completers.add(completer);
+    return completer.future;
+  }
+}
+
+/// 一张图片的下载任务。两种实现: 缓存+整图缓冲的老路径, 和边下边写的新路径。
+abstract class _ImageTask {
+  Object? error;
+
+  bool get isFinished;
+
+  void cancel();
+
+  Future<_ImageTask> wait();
+}
+
+/// 流式下载任务: 只负责跑 [run] 并通知完成, 图片本身直接写进目标文件。
+class _StreamImageTask implements _ImageTask {
+  @override
+  Object? error;
+
+  @override
+  bool isFinished = false;
+
+  bool _canceled = false;
+
+  bool get canceled => _canceled;
+
+  final _completers = <Completer<_ImageTask>>[];
+
+  _StreamImageTask(Future<void> Function(_StreamImageTask task) run,
+      {void Function()? onFinished}) {
+    _run(run, onFinished);
+  }
+
+  Future<void> _run(Future<void> Function(_StreamImageTask task) run,
+      void Function()? onFinished) async {
+    try {
+      await run(this);
+      if (_canceled) {
+        throw Exception("canceled");
+      }
+      isFinished = true;
+    } catch (e) {
+      error = e;
+    }
+    onFinished?.call();
+    for (var completer in _completers) {
+      completer.complete(this);
+    }
+  }
+
+  @override
+  void cancel() {
+    _canceled = true;
+  }
+
+  @override
+  Future<_ImageTask> wait() {
+    if (isFinished) {
+      return Future.value(this);
+    }
+    var completer = Completer<_ImageTask>();
+    _completers.add(completer);
     return completer.future;
   }
 }

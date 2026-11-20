@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:dynamic_color/dynamic_color.dart';
@@ -36,6 +37,12 @@ void main(List<String> args) {
     FlutterError.onError = (details) {
       LogManager.addLog(LogLevel.error, "Unhandled Exception",
           "${details.exception}\n${details.stack}");
+    };
+    // 平台侧/zone 外的异步异常也要进日志, 否则下载过程中断只能看到进程消失
+    PlatformDispatcher.instance.onError = (error, stack) {
+      LogManager.addLog(LogLevel.error, "Unhandled Async Exception",
+          "$error\n$stack");
+      return false;
     };
     notFirstUse = appdata.firstUse[3] == "1";
     setNetworkProxy();
