@@ -1,3 +1,15 @@
+### 4.8.8-mod 本版修复
+
+**修复「发送到邮箱」报 No email clients found**
+
+- 上一版点了会弹「发送失败: PlatformException(not_available, No email clients found!)」：
+  Android 11 起有包可见性限制，App 不显式声明要查哪类 App 就查不到已安装的邮件 App，
+  于是被判定成「没有邮件客户端」
+- 现在在清单里补上了 mailto 与带附件分享所需的查询声明，只要装了 QQ邮箱 / Outlook / Gmail 等
+  任一邮件 App，就能正常弹出选择、收件人与附件都已预填
+- 另加一层兜底：万一机型上确实没有注册 mailto 的邮件 App，会自动改走系统分享面板——
+  附件照样带上，选任意 App 发送即可（此时收件人写在正文里，需要自己填一次）
+
 ### 4.8.7-mod 本版改动
 
 **日志可一键发给自己的邮箱**

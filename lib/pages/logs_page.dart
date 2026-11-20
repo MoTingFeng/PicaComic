@@ -10,6 +10,7 @@ import 'package:pica_comic/foundation/log.dart';
 import 'package:pica_comic/network/download.dart';
 import 'package:pica_comic/tools/io_tools.dart';
 import 'package:pica_comic/tools/translations.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:pica_comic/components/components.dart';
 
 class LogsPage extends StatefulWidget {
@@ -126,18 +127,37 @@ Future<void> sendLogByEmail() async {
     showToast(message: "先到「设置 → APP → 日志上报邮箱」填写收件地址".tl);
     return;
   }
+  var subject = "[PicaComic] $appVersion ${_logTimestamp()}";
+  var body = _logMailBody();
+  String attachment;
   try {
-    var attachment = await _prepareLogAttachment();
+    attachment = await _prepareLogAttachment();
+  } catch (e) {
+    showToast(message: "${"准备日志文件失败".tl}: $e");
+    return;
+  }
+  try {
     // 带附件时只会列出邮件类 App(QQ邮箱/Outlook/Gmail 等), 收件人与附件都已填好,
     // 用户确认发送即可
     await FlutterEmailSender.send(Email(
       recipients: [to],
-      subject: "[PicaComic] $appVersion ${_logTimestamp()}",
-      body: _logMailBody(),
+      subject: subject,
+      body: body,
       attachmentPaths: [attachment],
     ));
+    return;
   } catch (e) {
-    LogManager.addLog(LogLevel.error, "Email", "发送日志失败: $e");
+    LogManager.addLog(LogLevel.error, "Email", "邮件 App 打不开, 改用系统分享: $e");
+  }
+  // 手机上没有任何注册了 mailto 的邮件 App(或系统不支持该 intent)时退一步:
+  // 走系统分享面板, 由用户挑任意 App 发送, 收件人写在正文里, 需要自己填
+  try {
+    await Share.shareXFiles(
+      [XFile(attachment)],
+      subject: subject,
+      text: "${"收件人".tl}: $to\n\n$body",
+    );
+  } catch (e) {
     showToast(message: "${"发送失败".tl}: $e");
   }
 }
