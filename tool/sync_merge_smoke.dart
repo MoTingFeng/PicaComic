@@ -53,6 +53,7 @@ void main() {
     _testLocalFavorites('${dir.path}/favorites');
     _testReadPositions();
     _testSettings();
+    _testAppdataJsonTypes();
     _testProtocol();
     _testIdempotent('${dir.path}/history', '${dir.path}/favorites');
   } finally {
@@ -442,6 +443,99 @@ void _testSettings() {
   _checkEquals('收藏标签取并集',
       (mergedAppdata['favoriteTags'] as List).join(','), 'tagA,tagB');
   _checkEquals('firstUse 保留本地', (mergedAppdata['firstUse'] as List)[3], '1');
+}
+
+// ---------------------------------------------------------------------------
+// mergeAppdataJson 输出类型 (4.10.1: 真机上 List<dynamic> 与 List<String> 相加会抛错)
+// ---------------------------------------------------------------------------
+
+const List<String> _appdataListKeys = [
+  'settings',
+  'firstUse',
+  'blockingKeywords',
+  'favoriteTags',
+];
+
+void _checkAppdataListTypes(String label, Map<String, dynamic> merged) {
+  for (final key in _appdataListKeys) {
+    final value = merged[key];
+    _check('$label: $key 是 List<String>', value is List<String>,
+        'actual=${value.runtimeType}');
+  }
+}
+
+void _testAppdataJsonTypes() {
+  print('[appdata merge types]');
+  final local = <String, dynamic>{
+    'settings': <String>['a', 'b', 'c', 'd', 'e'],
+    'firstUse': <String>['1', '1', '1', '1', '1'],
+    'blockingKeywords': <String>['foo'],
+    'favoriteTags': <String>['tagA'],
+  };
+  final settingsResult = mergeSettings(
+    local: <String>['a', 'b', 'c', 'd', 'e'],
+    localMeta: const {},
+    remote: <String>['a', 'b', 'c', 'd', 'e'],
+    remoteMeta: const {},
+  );
+
+  // 场景 1: 远端 appdata 缺列表字段 (旧版本/精简快照)
+  final missingFields = mergeAppdataJson(
+    local: local,
+    remote: <String, dynamic>{'settings': <String>['a', 'b', 'c', 'd', 'e']},
+    settings: settingsResult,
+  );
+  _checkAppdataListTypes('远端缺字段', missingFields);
+  _checkEquals('远端缺字段时屏蔽词保留本地',
+      (missingFields['blockingKeywords'] as List).join(','), 'foo');
+
+  // 场景 2: 远端列表是 List<dynamic> (jsonDecode 出来的真实产物)
+  final dynamicRemote = mergeAppdataJson(
+    local: local,
+    remote: <String, dynamic>{
+      'settings': <dynamic>['a', 'b', 'c', 'd', 'e'],
+      'firstUse': <dynamic>['0', '0', '0', '0', '0'],
+      'blockingKeywords': <dynamic>['foo', 'bar'],
+      'favoriteTags': <dynamic>['tagA', 'tagB'],
+    },
+    settings: settingsResult,
+  );
+  _checkAppdataListTypes('远端 List<dynamic>', dynamicRemote);
+  _checkEquals('远端 List<dynamic> 合并后取并集',
+      (dynamicRemote['blockingKeywords'] as List).join(','), 'foo,bar');
+  _checkEquals('远端 List<dynamic> 的收藏标签取并集',
+      (dynamicRemote['favoriteTags'] as List).join(','), 'tagA,tagB');
+
+  // 场景 3: 远端列表是 List<String>
+  final typedRemote = mergeAppdataJson(
+    local: local,
+    remote: <String, dynamic>{
+      'settings': <String>['a', 'b', 'c', 'd', 'e'],
+      'firstUse': <String>['0', '0', '0', '0', '0'],
+      'blockingKeywords': <String>['bar'],
+      'favoriteTags': <String>['tagB'],
+    },
+    settings: settingsResult,
+  );
+  _checkAppdataListTypes('远端 List<String>', typedRemote);
+
+  // 场景 4: 本地列表也是 List<dynamic> (appdata JSON 被 jsonDecode 过的场景)
+  final dynamicLocal = mergeAppdataJson(
+    local: <String, dynamic>{
+      'settings': <dynamic>['a', 'b', 'c', 'd', 'e'],
+      'firstUse': <dynamic>['1', '1', '1', '1', '1'],
+      'blockingKeywords': <dynamic>['foo'],
+      'favoriteTags': <dynamic>['tagA'],
+    },
+    remote: <String, dynamic>{
+      'settings': <String>['a', 'b', 'c', 'd', 'e'],
+      'firstUse': <String>['0', '0', '0', '0', '0'],
+      'blockingKeywords': <String>['bar'],
+      'favoriteTags': <String>['tagB'],
+    },
+    settings: settingsResult,
+  );
+  _checkAppdataListTypes('本地 List<dynamic>', dynamicLocal);
 }
 
 // ---------------------------------------------------------------------------

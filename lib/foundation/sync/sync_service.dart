@@ -352,6 +352,15 @@ class SyncService {
         return SyncResult.failure(mergeError);
       }
 
+      // 旧格式快照只需合并一次: sqlite 合并已落地就把 seed 标记立刻落盘,
+      // 避免后面的上传/设置应用/漫画源步骤失败导致每次冷启动都重做一遍(实测 7.7s/次)
+      if (legacyName != null && !_state.legacySeeded) {
+        _state.legacySeeded = true;
+        await _saveState();
+        LogManager.addLog(
+            LogLevel.info, 'Sync', 'Sync: 旧格式快照已合并, seed 标记已落盘');
+      }
+
       // 阅读位置合并
       var positions = ReadPositionStore.instance.exportForSync();
       for (final snapshot in snapshots) {
@@ -387,7 +396,8 @@ class SyncService {
         final remoteMeta = decodeSettingsMeta(
             metaFile.existsSync() ? metaFile.readAsStringSync() : null);
         final remoteSettings = remoteAppdata['settings'] is List
-            ? List<String>.from(remoteAppdata['settings'] as List)
+            ? List<String>.from(
+                (remoteAppdata['settings'] as List).map((e) => e.toString()))
             : <String>[];
         final merged = mergeSettings(
           local: settings,
@@ -406,7 +416,18 @@ class SyncService {
         );
       }
       if (snapshots.isNotEmpty) {
-        appdata.readDataFromJson(mergedAppdata);
+        // readDataFromJson 失败内部会把 appdata 回滚, 这里必须报失败而不是继续报"完成"
+        final settingsApplied = appdata.readDataFromJson(mergedAppdata);
+        if (!settingsApplied) {
+          const error = '设置合并失败: Appdata.readDataFromJson 返回 false, 本轮设置未应用';
+          LogManager.addLog(LogLevel.error, 'Sync', 'Sync: $error');
+          _state.lastResult = 'failed';
+          _state.lastError = error;
+          _state.pulledDevices = pulled;
+          _state.lastStats = stats.clone();
+          await _saveState();
+          return SyncResult.failure(error);
+        }
         _settingsMeta = settingsMeta;
         _saveSettingsMeta();
         _settingsBaseline = List<String>.from(appdata.settings);
@@ -439,9 +460,6 @@ class SyncService {
           size: snapshot.size,
           updatedAt: snapshot.updatedAt,
         );
-      }
-      if (legacyName != null) {
-        _state.legacySeeded = true;
       }
       _state.lastSyncAt = DateTime.now().millisecondsSinceEpoch;
       _state.lastResult = uploaded ? 'ok' : 'failed';
@@ -542,10 +560,11 @@ class SyncService {
     List<dynamic> files;
     try {
       files = await Webdav.listDir(cfg, cfg.remotePath('$syncDevicesDirName'));
-    } catch (e) {
-      // 首次同步时 devices/ 还不存在, 当成没有设备快照
+    } catch (_) {
+      // 首次同步时 devices/ 还不存在(服务器返回 404), 当成没有设备快照:
+      // 这里只留一句 info, 不再把 DioException 全量刷进日志
       LogManager.addLog(
-          LogLevel.info, 'Sync', 'Sync: 读取 devices/ 失败(可能还不存在): $e');
+          LogLevel.info, 'Sync', 'Sync: 远端还没有 devices/ 目录, 按无设备快照处理');
       return const [];
     }
     final candidates = <_RemoteCandidate>[];

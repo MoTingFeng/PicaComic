@@ -853,10 +853,10 @@ Map<String, dynamic> mergeAppdataJson({
   required SettingsMergeResult settings,
 }) {
   final merged = Map<String, dynamic>.from(local);
-  merged['settings'] = settings.settings;
-  if (local['firstUse'] == null && remote['firstUse'] != null) {
-    merged['firstUse'] = remote['firstUse'];
-  }
+  // 输出统一成 List<String>: base.dart 的 readDataFromJson 会直接拿它和本地
+  // List<String> 做集合运算, 留 List<dynamic> 会在真机上抛类型错误
+  merged['settings'] = List<String>.from(settings.settings);
+  merged['firstUse'] = _stringList(local['firstUse'] ?? remote['firstUse']);
   merged['blockingKeywords'] = _unionStringList(
     _stringList(local['blockingKeywords']),
     _stringList(remote['blockingKeywords']),

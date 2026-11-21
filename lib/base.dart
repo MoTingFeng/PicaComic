@@ -252,7 +252,7 @@ class Appdata {
 
   bool readDataFromJson(Map<String, dynamic> json) {
     try {
-      var newSettings = List<String>.from(json["settings"]);
+      var newSettings = _toStringList(json["settings"]);
       var downloadPath = settings[22];
       var authRequired = settings[13];
       for (var i = 0; i < settings.length && i < newSettings.length; i++) {
@@ -260,19 +260,23 @@ class Appdata {
       }
       settings[22] = downloadPath;
       settings[13] = authRequired;
-      var newFirstUse = List<String>.from(json["firstUse"]);
+      var newFirstUse = _toStringList(json["firstUse"]);
       for (var i = 0; i < firstUse.length && i < newFirstUse.length; i++) {
         firstUse[i] = newFirstUse[i];
       }
       if (json["history"] != null) {
         history.readDataFromJson(json["history"]);
       }
-      // merge data
-      blockingKeyword = Set<String>.from(
-              ((json["blockingKeywords"] ?? []) + blockingKeyword) as List)
-          .toList();
-      favoriteTags =
-          Set.from((json["favoriteTags"] ?? []) + List.from(favoriteTags));
+      // merge data: jsonDecode 出来的列表是 List<dynamic>, 先统一成 List<String>
+      // 再和本地 list 相加, 否则会抛 'List<dynamic>' is not a subtype of 'List<String>'
+      blockingKeyword = {
+        ..._toStringList(json["blockingKeywords"]),
+        ...blockingKeyword,
+      }.toList();
+      favoriteTags = {
+        ..._toStringList(json["favoriteTags"]),
+        ...favoriteTags,
+      };
       writeData(false);
       return true;
     } catch (e, s) {
@@ -284,6 +288,14 @@ class Appdata {
   }
 
   final appSettings = _Settings();
+}
+
+/// json 里的列表可能是 List<dynamic> / null, 统一成 List<String> 再做集合运算
+List<String> _toStringList(dynamic value) {
+  if (value is List) {
+    return value.map((e) => e.toString()).toList();
+  }
+  return <String>[];
 }
 
 var appdata = Appdata();
