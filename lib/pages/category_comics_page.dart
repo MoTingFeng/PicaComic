@@ -4,6 +4,7 @@ import "package:pica_comic/comic_source/comic_source.dart";
 import 'package:pica_comic/components/components.dart';
 import "package:pica_comic/foundation/app.dart";
 import "package:pica_comic/foundation/browse_anchor.dart";
+import "package:pica_comic/foundation/category_options.dart";
 import "package:pica_comic/foundation/state_controller.dart";
 import "package:pica_comic/network/base_comic.dart";
 import "package:pica_comic/network/res.dart";
@@ -68,6 +69,8 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
             groupValues[part.title] = params.first;
           }
         }
+        // 恢复上次在这个分类下选的排序与多维筛选, 让浏览锚点的 key 稳定
+        _restoreCategoryOptions();
         return;
       }
     }
@@ -77,7 +80,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
   @override
   void initState() {
     findData();
-    _initAnchor();
+    _reloadAnchor();
     super.initState();
   }
 
@@ -101,11 +104,14 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
 
   // ==== 浏览位置: 记录上次看到第几页, 重进时提示是否跳回 ====
 
-  /// 本次进入页面时读到的锚点, 只在进入时读一次
+  /// 当前排序/筛选组合读到的锚点; 切换组合时由 [_reloadAnchor] 重读
   BrowseAnchor? anchor;
 
-  /// 读到的锚点属于哪个筛选组合; 用户切了筛选就不再提示
+  /// 读到的锚点属于哪个筛选组合; 与当前组合不一致时不提示
   String? _anchorLoadedKey;
+
+  /// 每次重读锚点自增; 异步任务回来时发现变了就丢弃结果
+  int _anchorGeneration = 0;
 
   /// 进入时的记录页: 没越过它就不覆盖记录, 否则一进页面(只加载第 1 页)
   /// 就会把「上次看到第 5 页」冲成第 1 页
@@ -153,11 +159,60 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
   Future<Res<List<BaseComic>>> Function(int) get _pageLoader =>
       (page) => loader(widget.category, widget.param, optionsValue, page);
 
-  void _initAnchor() {
+  /// 读取当前排序/筛选组合的浏览锚点; 切换排序或分组后也要调用,
+  /// 切到有记录的组合就提示上次位置, 没记录就不提示
+  void _reloadAnchor() {
+    _anchorGeneration++;
+    _anchorLoadedKey = null;
+    anchor = null;
+    _anchorFloor = 0;
+    anchorDismissed = false;
+    anchorJumping = false;
+    anchorFetchingNew = false;
+    anchorProgress = null;
+    anchorDiff = null;
+    anchorJumpPage = null;
     if (!_anchorEnabled) return;
     _anchorLoadedKey = _anchorKey;
     anchor = BrowseAnchorStore.instance[_anchorKey];
     _anchorFloor = anchor?.page ?? 0;
+  }
+
+  // ==== 记住上次选中的排序与多维筛选 ====
+
+  /// 存储按「源|分类|子分类」一条记录, 与具体的排序/筛选组合无关
+  String get _categoryOptionsKey =>
+      "$_anchorSourceKey|${widget.category}|${widget.param}";
+
+  late final CategoryOptionsStore _categoryOptionsStore =
+      CategoryOptionsStore.of(App.dataPath);
+
+  /// 恢复上次在这个分类下选的排序与多维筛选; 已经不存在的值回退到默认第一项
+  void _restoreCategoryOptions() {
+    var restored = resolveCategoryOptions(
+      saved: _categoryOptionsStore[_categoryOptionsKey],
+      availableOptions: [
+        for (final option in options) option.options.keys.toList(),
+      ],
+      defaultOptions: optionsValue,
+      availableGroups: {
+        for (final entry in groupValues.entries)
+          entry.key: _findPart(entry.key)?.categoryParams ?? const <String>[],
+      },
+      defaultGroups: groupValues,
+    );
+    optionsValue = restored.options;
+    groupValues
+      ..clear()
+      ..addAll(restored.groups);
+  }
+
+  /// 写盘走 500ms 防抖, 连续点标签不会反复写文件
+  void _saveCategoryOptions() {
+    _categoryOptionsStore.save(
+      _categoryOptionsKey,
+      CategoryOptions(options: optionsValue, groups: groupValues),
+    );
   }
 
   List<BaseComic> _loadedComics(ComicsPageLogic<BaseComic> logic) {
@@ -190,6 +245,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
     var logic =
         StateController.findOrNull<ComicsPageLogic<BaseComic>>(tag: _listTag);
     if (logic == null) return;
+    var generation = _anchorGeneration;
     setState(() {
       anchorJumping = true;
       anchorProgress = null;
@@ -207,7 +263,8 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
     } else {
       ok = await logic.jumpTo(_pageLoader, old.page);
     }
-    if (!mounted) return;
+    // 补齐期间用户切了排序/筛选就丢弃这次结果, 免得把旧组合的差异写到新组合上
+    if (!mounted || generation != _anchorGeneration) return;
     var diff = computeAnchorDiff(
       old: old,
       loaded: _loadedComics(logic),
@@ -231,6 +288,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
   Future<void> _showNewComics() async {
     var old = anchor;
     if (old == null || anchorFetchingNew) return;
+    var generation = _anchorGeneration;
     List<BaseComic> items;
     var restPages = 0;
     if (_sortValue == "da") {
@@ -250,7 +308,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
         fetched.addAll(res.data);
         pages++;
       }
-      if (!mounted) return;
+      if (!mounted || generation != _anchorGeneration) return;
       setState(() => anchorFetchingNew = false);
       items = fetched;
       restPages = total - (basePage + pages);
@@ -258,7 +316,7 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
     } else {
       items = anchorDiff?.newComics ?? const [];
     }
-    if (!mounted) return;
+    if (!mounted || generation != _anchorGeneration) return;
     if (items.isEmpty) {
       showToast(message: "没有拉到新增内容".tl);
       return;
@@ -441,6 +499,8 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
         if (value == optionsValue[group]) return;
         setState(() {
           optionsValue[group] = value;
+          _saveCategoryOptions();
+          _reloadAnchor();
         });
       },
     );
@@ -483,6 +543,8 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
                 if (value == groupValues[entry.key]) return;
                 setState(() {
                   groupValues[entry.key] = value;
+                  _saveCategoryOptions();
+                  _reloadAnchor();
                 });
               },
             )
