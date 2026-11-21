@@ -320,6 +320,18 @@ class LocalFavoritesManager {
       );
     """);
     }
+    if (!tables.contains('sync_tombstone')) {
+      // WebDAV 同步的删除墓碑: 记录某收藏夹里删掉的作品, 让删除跨设备生效
+      _db.execute("""
+      create table sync_tombstone (
+        target TEXT,
+        type INTEGER,
+        folder TEXT,
+        deleted_at INTEGER,
+        primary key (target, type, folder)
+      );
+    """);
+    }
     tables.remove('folder_sync');
     tables.remove('folder_order');
     if(tables.isEmpty)  return;
@@ -357,6 +369,19 @@ class LocalFavoritesManager {
         """);
       }
     }
+  }
+
+  /// 同步合并会直接改 local_favorite.db, 合并前先关掉本进程的连接
+  void closeForSync() {
+    _db.dispose();
+  }
+
+  /// 同步合并结束后重开连接、重建缓存并刷新界面
+  void refreshAfterSync() {
+    _db = sqlite3.open("${App.dataPath}/local_favorite.db");
+    _checkAndCreate();
+    _modifiedAfterLastCache = true;
+    updateUI();
   }
 
   void updateUI() {
@@ -682,6 +707,11 @@ class LocalFavoritesManager {
     if (!folderNames.contains(folder)) {
       throw Exception("Folder does not exists");
     }
+    // 重新收藏时清掉删除墓碑, 否则同步时会把它当成删除处理
+    _db.execute("""
+      delete from sync_tombstone
+      where target == ? and type == ? and folder == ?;
+    """, [comic.target, comic.type.key, folder]);
     var res = _db.select("""
       select * from "$folder"
       where target == '${comic.target}';
@@ -789,6 +819,11 @@ class LocalFavoritesManager {
       delete from "$folder"
       where target == ? and type == ?;
     """, [target, type.key]);
+    // 记删除墓碑, WebDAV 同步时其它设备也删掉(带 folder, 不影响同一作品在别的收藏夹的记录)
+    _db.execute("""
+      insert or replace into sync_tombstone(target, type, folder, deleted_at)
+      values(?, ?, ?, ?);
+    """, [target, type.key, folder, DateTime.now().millisecondsSinceEpoch]);
     saveData();
   }
 

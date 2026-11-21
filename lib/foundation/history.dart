@@ -348,6 +348,20 @@ class HistoryManager {
         StateController.findOrNull(tag: "me_page")?.update();
       });
     }
+    // 阅读位置变了, 触发 WebDAV 防抖上传(旧逻辑只在开始阅读时上传)
+    Webdav.uploadData();
+  }
+
+  /// 同步合并会直接改 history.db, 合并前先关掉本进程的连接
+  void closeForSync() {
+    _db.dispose();
+  }
+
+  /// 同步合并结束后重开连接并刷新缓存
+  void reopenAfterSync() {
+    _db = sqlite3.open("${App.dataPath}/history.db");
+    ImageFavoriteManager.init();
+    updateCache();
   }
 
   void clearHistory() {

@@ -1,182 +1,122 @@
-import 'dart:math';
+import 'dart:convert';
+import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:pica_comic/components/components.dart';
-import 'package:pica_comic/foundation/app.dart';
-import 'package:pica_comic/foundation/log.dart';
-import 'package:pica_comic/tools/extensions.dart';
-import 'package:pica_comic/tools/io_tools.dart';
-import 'package:pica_comic/tools/translations.dart';
-import 'package:webdav_client/webdav_client.dart';
+import 'package:pica_comic/foundation/sync/sync_protocol.dart';
+import 'package:pica_comic/foundation/sync/sync_service.dart';
+import 'package:webdav_client/webdav_client.dart' as webdav;
 
-import '../base.dart';
+/// WebDAV 连接配置: `URL;用户名;密码;路径` (设置 settings[45] 的格式)
+class WebdavConfig {
+  final String url;
 
-Future<bool> _retryZone(Future<bool> Function() fn) async {
-  int time = 1;
-  while (time < 1 << 3) {
-    var res = await fn();
-    if (res) {
-      return true;
+  final String user;
+
+  final String password;
+
+  /// 远端根路径, 以 / 结尾
+  final String root;
+
+  const WebdavConfig(this.url, this.user, this.password, this.root);
+
+  static WebdavConfig? tryParse(String? raw) {
+    if (raw == null || raw.isEmpty) {
+      return null;
     }
-    await Future.delayed(Duration(seconds: time));
-    time *= 2;
+    final configs = raw.split(';');
+    // 旧版失败后会往配置尾部追加 ";0" 来禁用同步, 长度不是 4 一律视为未配置
+    if (configs.length != 4 || configs[0].isEmpty) {
+      return null;
+    }
+    var root = configs[3];
+    if (root.isEmpty) {
+      root = '/';
+    }
+    if (!root.endsWith('/')) {
+      root += '/';
+    }
+    return WebdavConfig(configs[0], configs[1], configs[2], root);
   }
-  return false;
+
+  String remotePath(String relative) => '$root$relative';
 }
 
+/// WebDAV 传输层: 只负责读写文件, 快照内容与合并由 [SyncService] 处理。
+///
+/// 兼容旧调用点: [uploadData]/[downloadData]/[syncData] 语义已改成
+/// 「上传自己的设备快照」/「合并同步」。
 class Webdav {
-  static bool _isOperating = false;
-
-  static bool _haveWaitingTask = false;
-
-  /// Sync current data to webdav server. Return true if success.
-  static Future<bool> uploadData([String? config]) async {
-    if (_haveWaitingTask) {
-      return true;
-    }
-    if (_isOperating) {
-      _haveWaitingTask = true;
-      while (_isOperating) {
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-    }
-    _haveWaitingTask = false;
-    _isOperating = true;
-    appdata.settings[46] =
-        (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
-    appdata.updateSettings(false);
-    config ??= appdata.settings[45];
-    var configs = config.split(';');
-    if (configs.length != 4 || configs.elementAtOrNull(0) == "") {
-      _isOperating = false;
-      return true;
-    }
-    if (!configs[3].endsWith('/') && !configs[3].endsWith('\\')) {
-      configs[3] += '/';
-    }
-    LogManager.addLog(LogLevel.info, "network", "Uploading Data");
-    var client = newClient(
-      configs[0],
-      user: configs[1],
-      password: configs[2],
+  static webdav.Client _client(WebdavConfig config, {int connectTimeoutMs = 8000}) {
+    final client = webdav.newClient(
+      config.url,
+      user: config.user,
+      password: config.password,
       debug: false,
     );
-    client.setHeaders({'content-type': 'text/plain'});
+    client.setConnectTimeout(connectTimeoutMs);
+    return client;
+  }
+
+  /// 列出目录下的文件与子目录
+  static Future<List<webdav.File>> listDir(
+      WebdavConfig config, String path) async {
+    return (await _client(config).readDir(path));
+  }
+
+  /// 确保 devices/ 目录存在 (已存在时服务器可能报错, 忽略)
+  static Future<void> ensureDevicesDir(WebdavConfig config) async {
     try {
-      var files = await client.readDir(configs[3]);
-      for (var file in files) {
-        var name = file.name;
-        if (name != null) {
-          var version = name.split(".").first;
-          if (version.isNum) {
-            var days = int.parse(version) ~/ 86400;
-            var currentDays =
-                DateTime.now().millisecondsSinceEpoch ~/ 1000 ~/ 86400;
-            if (currentDays == days && file.path != null) {
-              client.remove(file.path!);
-              break;
-            }
-          }
-        }
-      }
-      await client.writeFromFile(await exportDataToFile(false, "${App.cachePath}/userdata.picadata"),
-          "${configs[3]}${appdata.settings[46]}.picadata");
-    } catch (e, s) {
-      LogManager.addLog(LogLevel.error, "Sync",
-          "Failed to upload data to webdav server.\n$e\n$s");
-      _isOperating = false;
-      return false;
+      await _client(config).mkdir(config.remotePath(syncDevicesDirName));
+    } catch (_) {
+      // 目录已存在或服务器不允许 MKCOL, 后续上传会暴露真实错误
     }
-    _isOperating = false;
+  }
+
+  static Future<void> uploadFile(
+      WebdavConfig config, String remotePath, String localPath) async {
+    await _client(config).writeFromFile(localPath, remotePath);
+  }
+
+  static Future<void> downloadFile(
+      WebdavConfig config, String remotePath, String localPath) async {
+    await _client(config).read2File(remotePath, localPath);
+  }
+
+  static Future<void> writeText(
+      WebdavConfig config, String remotePath, String text) async {
+    await _client(config).write(remotePath, Uint8List.fromList(utf8.encode(text)));
+  }
+
+  static Future<String?> readText(WebdavConfig config, String remotePath) async {
+    try {
+      final bytes = await _client(config).read(remotePath);
+      return utf8.decode(bytes, allowMalformed: true);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 兼容旧调用点
+  // -------------------------------------------------------------------------
+
+  /// 本地有变更时调用 (history/favorites/settings 里大量调用):
+  /// 不带 config = 防抖 5 秒后上传自己的快照; 带 config = 立即上传。
+  static Future<bool> uploadData([String? config]) async {
+    if (config != null) {
+      return SyncService.instance.uploadNow(config: config);
+    }
+    SyncService.instance.markDirty();
     return true;
   }
 
+  /// 兼容旧入口: 下载(现在是双向合并)
   static Future<bool> downloadData([String? config]) async {
-    _isOperating = true;
-    bool force = config != null;
-    try {
-      config ??= appdata.settings[45];
-      var configs = config.split(';');
-      if (configs.length != 4 || configs.elementAtOrNull(0) == "") {
-        return true;
-      }
-      if (!configs[3].endsWith('/') && !configs[3].endsWith('\\')) {
-        configs[3] += '/';
-      }
-      LogManager.addLog(LogLevel.info, "network", "Downloading Data");
-      var client = newClient(
-        configs[0],
-        user: configs[1],
-        password: configs[2],
-        debug: false,
-      );
-      client.setConnectTimeout(8000);
-      try {
-        var files = await client.readDir(configs[3]);
-        int? maxVersion;
-        for (var file in files) {
-          var name = file.name;
-          if (name != null) {
-            var version = name.split(".").first;
-            if (version.isNum) {
-              maxVersion = max(maxVersion ?? 0, int.parse(version));
-            }
-          }
-        }
-
-        if (!force && maxVersion.toString() == appdata.settings[46]) {
-          LogManager.addLog(LogLevel.info, "Sync",
-              "No updated version of data.\nStop downloading data.");
-          return true;
-        }
-
-        final fileName =
-            maxVersion != null ? "$maxVersion.picadata" : "picadata";
-
-        var cachePath = (await getApplicationCacheDirectory()).path;
-        await client.read2File("${configs[3]}$fileName", "$cachePath/picadata");
-        var res = await importData("$cachePath/picadata");
-        return res;
-      } catch (e, s) {
-        LogManager.addLog(LogLevel.error, "Sync",
-            "Failed to download data from webdav server.\n$e\n$s");
-        return false;
-      }
-    } finally {
-      _isOperating = false;
-    }
+    final result = await SyncService.instance.syncNow(config: config);
+    return result.success;
   }
 
+  /// 兼容旧入口: 弹加载框手动同步
   static void syncData() async {
-    var configs = appdata.settings[45].split(';');
-    if (configs.length != 4 || configs.elementAtOrNull(0) == "") {
-      return;
-    }
-    var controller = showLoadingDialog(
-      App.globalContext!,
-      barrierDismissible: false,
-      allowCancel: true,
-      message: "同步数据中".tl,
-      cancelButtonText: "隐藏".tl,
-    );
-    var res = await _retryZone(Webdav.downloadData);
-    await Future.delayed(const Duration(milliseconds: 50));
-    if (!res) {
-      controller.close();
-      appdata.settings[45] = "${appdata.settings[45]};0";
-      showToast(
-        message: "下载数据失败, 已禁用同步".tl,
-        trailing: Button.icon(
-          onPressed: () {
-            appdata.settings[45] = configs.join(';');
-            syncData();
-          },
-          icon: const Icon(Icons.refresh),
-        ),
-      );
-    } else {
-      controller.close();
-    }
+    await SyncService.instance.manualSync();
   }
 }

@@ -1,14 +1,15 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:pica_comic/foundation/app.dart';
+import 'package:pica_comic/foundation/sync/sync_merge.dart';
 
 /// 每话各自的阅读页码: 作品 -> (话号 -> 页号)。
 ///
 /// 历史记录里只有一个当前位置, 这里补上「每一话停在哪一页」,
 /// 这样点任意一话都能回到那一话上次停下的地方, 而不是从头开始。
-/// 数据独立存放, 不进历史表也不参与云备份, 坏了只影响这一份位置。
+/// 数据独立存放, 不进历史表; WebDAV 同步时按 target+话号 合并,
+/// 所以每话额外记一个 updatedAt (旧文件没有, 读出来按 0 处理)。
 class ReadPositionStore {
   ReadPositionStore._();
 
@@ -22,12 +23,18 @@ class ReadPositionStore {
 
   final Map<String, Map<int, int>> _data = {};
 
+  /// 作品 -> (话号 -> 写入时间), 供同步合并判断谁更新
+  final Map<String, Map<int, int>> _time = {};
+
   /// 作品最近一次写入时间, 用于淘汰
   final Map<String, int> _touch = {};
 
   bool _loaded = false;
 
   Timer? _saveTimer;
+
+  /// 本地写入后回调, 用于触发 WebDAV 防抖上传
+  void Function()? onChanged;
 
   File get _file => File("${App.dataPath}/read_positions.json");
 
@@ -36,21 +43,26 @@ class ReadPositionStore {
     _loaded = true;
     try {
       if (!_file.existsSync()) return;
-      var json = jsonDecode(_file.readAsStringSync());
-      if (json is! Map) return;
-      for (final entry in json.entries) {
-        var value = entry.value;
-        if (value is! Map) continue;
-        var eps = <int, int>{};
-        for (final e in value.entries) {
-          var ep = int.tryParse(e.key.toString());
-          if (ep == null) continue;
-          if (e.value is num) eps[ep] = (e.value as num).toInt();
+      final positions = parseReadPositions(_file.readAsStringSync());
+      for (final entry in positions.entries) {
+        var newest = 0;
+        final times = <int, int>{};
+        for (final ep in entry.value.entries) {
+          times[ep.key] = ep.value.updatedAt;
+          if (ep.value.updatedAt > newest) {
+            newest = ep.value.updatedAt;
+          }
         }
-        if (eps.isNotEmpty) _data[entry.key.toString()] = eps;
+        if (entry.value.isEmpty) continue;
+        _data[entry.key] = {
+          for (final ep in entry.value.entries) ep.key: ep.value.page,
+        };
+        _time[entry.key] = times;
+        _touch[entry.key] = newest;
       }
     } catch (_) {
       _data.clear();
+      _time.clear();
     }
   }
 
@@ -75,15 +87,19 @@ class ReadPositionStore {
     var pages = _data.putIfAbsent(target, () => {});
     if (pages[ep] == page) return;
     pages[ep] = page;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _time.putIfAbsent(target, () => {})[ep] = now;
     if (pages.length > maxEps) {
       var keys = pages.keys.toList()..sort();
       for (final key in keys.take(pages.length - maxEps)) {
         pages.remove(key);
+        _time[target]?.remove(key);
       }
     }
-    _touch[target] = DateTime.now().millisecondsSinceEpoch;
+    _touch[target] = now;
     _trim();
     _scheduleSave();
+    onChanged?.call();
   }
 
   void _trim() {
@@ -92,6 +108,7 @@ class ReadPositionStore {
       ..sort((a, b) => (_touch[a] ?? 0).compareTo(_touch[b] ?? 0));
     for (final key in keys.take(_data.length - maxTargets)) {
       _data.remove(key);
+      _time.remove(key);
       _touch.remove(key);
     }
   }
@@ -105,14 +122,49 @@ class ReadPositionStore {
     _saveTimer?.cancel();
     _saveTimer = null;
     try {
-      _file.writeAsStringSync(jsonEncode({
-        for (final entry in _data.entries)
-          entry.key: {
-            for (final e in entry.value.entries) e.key.toString(): e.value,
-          },
-      }));
+      _file.writeAsStringSync(encodeReadPositions(_export()));
     } catch (_) {
       // 写盘失败不影响阅读
     }
+  }
+
+  ReadPositions _export() => {
+        for (final entry in _data.entries)
+          entry.key: {
+            for (final e in entry.value.entries)
+              e.key: ReadPositionEntry(e.value, _time[entry.key]?[e.key] ?? 0),
+          },
+      };
+
+  /// 导出全部阅读位置给同步合并用
+  ReadPositions exportForSync() {
+    _load();
+    return _export();
+  }
+
+  /// 同步合并后把合并结果整体应用到内存与文件
+  void applyMerged(ReadPositions merged) {
+    _load();
+    _data.clear();
+    _time.clear();
+    _touch.clear();
+    for (final entry in merged.entries) {
+      if (entry.value.isEmpty) continue;
+      var newest = 0;
+      final times = <int, int>{};
+      for (final ep in entry.value.entries) {
+        times[ep.key] = ep.value.updatedAt;
+        if (ep.value.updatedAt > newest) {
+          newest = ep.value.updatedAt;
+        }
+      }
+      _data[entry.key] = {
+        for (final ep in entry.value.entries) ep.key: ep.value.page,
+      };
+      _time[entry.key] = times;
+      _touch[entry.key] = newest;
+    }
+    _trim();
+    saveToFile();
   }
 }

@@ -13,6 +13,7 @@ import 'package:pica_comic/foundation/cache_manager.dart';
 import 'package:pica_comic/foundation/history.dart';
 import 'package:pica_comic/foundation/local_favorites.dart';
 import 'package:pica_comic/foundation/log.dart';
+import 'package:pica_comic/foundation/sync/sync_protocol.dart';
 import 'package:pica_comic/network/cookie_jar.dart';
 import 'package:pica_comic/network/download.dart';
 import 'package:pica_comic/network/download_model.dart';
@@ -571,6 +572,106 @@ Future<String?> getDataFromUserSelectedFile(List<String> extensions) async {
     return null;
   }
   return File(filePath).readAsStringSync();
+}
+
+/// 把同步快照打成一个 zip:
+/// appdata + settings_meta.json + history.db + local_favorite.db + read_positions.json
+/// + comic_source/*.js + manifest.json。
+///
+/// **不含 cookies.db** (登录态各设备独立, 避免互踢) 与下载目录。
+/// 返回 manifest 里的「快照内路径 -> sha256」。
+Future<Map<String, String>> exportSyncSnapshot({
+  required String outPath,
+  required String deviceId,
+  required int updatedAt,
+  required Map<int, int> settingsMeta,
+}) async {
+  final dataPath = App.dataPath;
+  final staging = Directory("${App.cachePath}/sync_build");
+  if (staging.existsSync()) {
+    staging.deleteSync(recursive: true);
+  }
+  staging.createSync(recursive: true);
+  final hashes = <String, String>{};
+  final comicSourceFiles = <String>[];
+  try {
+    final appdataFile = File("${staging.path}/$syncAppdataFileName");
+    appdataFile.writeAsStringSync(const JsonEncoder().convert(appdata.toJson()));
+    hashes[syncAppdataFileName] = sha256OfFile(appdataFile.path);
+
+    final metaFile = File("${staging.path}/$syncSettingsMetaFileName");
+    metaFile.writeAsStringSync(encodeSettingsMeta(settingsMeta));
+    hashes[syncSettingsMetaFileName] = sha256OfFile(metaFile.path);
+
+    final dataFiles = <String>[
+      syncHistoryDbFileName,
+      syncLocalFavoritesDbFileName,
+      syncReadPositionsFileName,
+    ];
+    for (final name in dataFiles) {
+      final file = File("$dataPath/$name");
+      if (file.existsSync()) {
+        hashes[name] = sha256OfFile(file.path);
+      }
+    }
+
+    final comicSourceDir = Directory("$dataPath/$syncComicSourceDirName");
+    if (comicSourceDir.existsSync()) {
+      for (final entry in comicSourceDir.listSync()) {
+        if (entry is File) {
+          final name = "$syncComicSourceDirName/${entry.uri.pathSegments.last}";
+          comicSourceFiles.add(name);
+          hashes[name] = sha256OfFile(entry.path);
+        }
+      }
+    }
+
+    final manifest = SyncManifest(
+      version: syncProtocolVersion,
+      deviceId: deviceId,
+      updatedAt: updatedAt,
+      files: hashes,
+    );
+    final manifestFile = File("${staging.path}/$syncManifestFileName");
+    manifestFile.writeAsStringSync(manifest.encode());
+
+    final out = File(outPath);
+    if (out.existsSync()) {
+      out.deleteSync();
+    }
+    final encode = ZipFile.open(outPath);
+    try {
+      encode.addFile(syncAppdataFileName, appdataFile.path);
+      encode.addFile(syncSettingsMetaFileName, metaFile.path);
+      encode.addFile(syncManifestFileName, manifestFile.path);
+      for (final name in dataFiles) {
+        final file = File("$dataPath/$name");
+        if (file.existsSync()) {
+          encode.addFile(name, file.path);
+        }
+      }
+      for (final name in comicSourceFiles) {
+        encode.addFile(name, "$dataPath/$name");
+      }
+    } finally {
+      encode.close();
+    }
+    return hashes;
+  } finally {
+    if (staging.existsSync()) {
+      staging.deleteSync(recursive: true);
+    }
+  }
+}
+
+/// 解压同步快照到 [outDir], 调用方负责清理
+Future<void> extractSyncSnapshot(String zipPath, String outDir) async {
+  final dir = Directory(outDir);
+  if (dir.existsSync()) {
+    dir.deleteSync(recursive: true);
+  }
+  dir.createSync(recursive: true);
+  ZipFile.openAndExtract(zipPath, outDir);
 }
 
 extension FileExtension on File {
