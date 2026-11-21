@@ -141,6 +141,42 @@ class LogManager {
   static String maskSecrets(String text) {
     return text.replaceAllMapped(_secretPattern, (m) => "${m.group(1)}: ***");
   }
+
+  /// 同一条日志在窗口期内只记一次(握手失败/重试这类一次网络故障会刷上千条)
+  static final _throttle = <String, DateTime>{};
+
+  static void addLogThrottled(String key, LogLevel level, String title,
+      String content, {Duration window = const Duration(seconds: 30)}) {
+    var now = DateTime.now();
+    var last = _throttle[key];
+    if (last != null && now.difference(last) < window) {
+      return;
+    }
+    _throttle[key] = now;
+    if (_throttle.length > 100) {
+      _throttle.remove(_throttle.keys.first);
+    }
+    addLog(level, title, content);
+  }
+
+  static String? _lastUnhandled;
+
+  static DateTime? _lastUnhandledAt;
+
+  /// 未捕获异常落盘: 同一个异常 30 秒内只记一次,
+  /// 否则一次代理/TLS 故障就能把日志刷满几百条栈
+  static void logUnhandled(Object error, StackTrace? stack) {
+    var text = error.toString();
+    var now = DateTime.now();
+    if (text == _lastUnhandled &&
+        _lastUnhandledAt != null &&
+        now.difference(_lastUnhandledAt!) < const Duration(seconds: 30)) {
+      return;
+    }
+    _lastUnhandled = text;
+    _lastUnhandledAt = now;
+    addLog(LogLevel.error, "Unhandled Exception", "$text\n$stack");
+  }
 }
 
 class Log {

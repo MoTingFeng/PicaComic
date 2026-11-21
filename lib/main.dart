@@ -35,13 +35,12 @@ void main(List<String> args) {
     WidgetsFlutterBinding.ensureInitialized();
     await init();
     FlutterError.onError = (details) {
-      LogManager.addLog(LogLevel.error, "Unhandled Exception",
-          "${details.exception}\n${details.stack}");
+      // 同一个异常 30 秒内只记一次(网络故障时原来会刷出成百条栈)
+      LogManager.logUnhandled(details.exception, details.stack);
     };
     // 平台侧/zone 外的异步异常也要进日志, 否则下载过程中断只能看到进程消失
     PlatformDispatcher.instance.onError = (error, stack) {
-      LogManager.addLog(LogLevel.error, "Unhandled Async Exception",
-          "$error\n$stack");
+      LogManager.logUnhandled(error, stack);
       return false;
     };
     notFirstUse = appdata.firstUse[3] == "1";
@@ -68,7 +67,7 @@ void main(List<String> args) {
       });
     }
   }, (error, stack) {
-    LogManager.addLog(LogLevel.error, "Unhandled Exception", "$error\n$stack");
+    LogManager.logUnhandled(error, stack);
   });
 }
 

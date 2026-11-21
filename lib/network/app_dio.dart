@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
 import 'package:flutter/services.dart';
 import 'package:pica_comic/foundation/log.dart';
+import 'package:pica_comic/components/components.dart';
 import 'package:dio_http2_adapter/dio_http2_adapter.dart';
 import 'package:pica_comic/network/http_client.dart';
 import '../base.dart';
@@ -134,10 +135,12 @@ class AppHttpAdapter implements HttpClientAdapter{
     while(true){
       try{
         var res = await fetchOnce(o, requestStream, cancelFuture);
+        NetworkHealth.onSuccess();
         return res;
       }
       catch(e){
         if(e is DioException) {
+          NetworkHealth.onFailure(e);
           if(e.response?.statusCode != null) {
             var code = e.response!.statusCode!;
             if(code >= 400 && code < 500) {
@@ -145,7 +148,8 @@ class AppHttpAdapter implements HttpClientAdapter{
             }
           }
         }
-        LogManager.addLog(LogLevel.error, "Network",
+        // 代理不通/握手失败时会连续刷同样的错误, 这里做节流, 免得日志被淹没
+        LogManager.addLogThrottled("net-retry", LogLevel.error, "Network",
             "${o.method} ${o.path}\n$e\nRetrying...");
         retry++;
         if(retry == 2){
@@ -239,3 +243,49 @@ Dio logDio([BaseOptions? options, bool http2 = false]) {
 }
 
 
+/// 连续"连接层"失败(握手失败/连接超时/连不上)的计数与用户提示。
+/// 代理配错或网络不通时, 界面只会一直转圈, 这里给一句人话提示,
+/// 而不是让日志里刷满 DioException 栈。
+class NetworkHealth {
+  static int _failures = 0;
+
+  static DateTime? _lastNotified;
+
+  static bool _isConnectionLevel(Object? error) {
+    var text = error?.toString() ?? "";
+    return text.contains("HandshakeException") ||
+        text.contains("Connection terminated during handshake") ||
+        text.contains("Connection reset") ||
+        text.contains("Connection refused") ||
+        text.contains("Failed host lookup") ||
+        text.contains("SocketException") ||
+        text.contains("TlsException");
+  }
+
+  static void onFailure(DioException e) {
+    var connectionLevel = _isConnectionLevel(e.error) ||
+        e.type == DioExceptionType.connectionError ||
+        e.type == DioExceptionType.connectionTimeout;
+    if (!connectionLevel) {
+      return;
+    }
+    _failures++;
+    if (_failures < 5) {
+      return;
+    }
+    var now = DateTime.now();
+    _failures = 0;
+    if (_lastNotified != null &&
+        now.difference(_lastNotified!) < const Duration(minutes: 2)) {
+      return;
+    }
+    _lastNotified = now;
+    LogManager.addLog(LogLevel.warning, "Network",
+        "连续多次连接/握手失败, 疑似代理或网络不通");
+    showToast(message: "网络连不上: 请检查 设置 → 网络 → 代理");
+  }
+
+  static void onSuccess() {
+    _failures = 0;
+  }
+}

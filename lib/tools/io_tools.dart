@@ -416,7 +416,8 @@ Future<bool> importData([String? filePath]) async {
       filePath = file?.path;
     }
     if (filePath == null) {
-      LogManager.addLog(LogLevel.error, "importData", "filePath is null");
+      // 用户在选择文件对话框里取消, 不是错误; 也不该在日志里刷 error
+      LogManager.addLog(LogLevel.info, "importData", "未选择要导入的文件");
       return false;
     }
   }
