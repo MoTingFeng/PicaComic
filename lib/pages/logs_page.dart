@@ -178,6 +178,9 @@ Future<void> sendLogByEmail() async {
   _mailReturnWatcher = watcher;
   watcher.start();
   _lastMailLaunch = DateTime.now();
+  // 这句必须在拉起邮件 App 之前显示: 邮件 App 一起来就会盖住本页, App 进入 paused 后
+  // 不再出帧, 之后插入的 toast 到 2 秒被回收时一次都没画过, 等于没提示。
+  showToast(message: "已打开邮件 App, 发送完成请手动返回 PicaComic".tl);
   try {
     // 带附件时只会列出邮件类 App(QQ邮箱/Outlook/Gmail 等), 收件人与附件都已填好,
     // 用户确认发送即可。这个 Future 要到邮件 App 返回才完成, 因此只等一个很短的
@@ -205,11 +208,6 @@ Future<void> sendLogByEmail() async {
     }
     return;
   }
-  // 邮件 App 已经回传结果时用户其实已经回来了, 再说「请手动返回」
-  // 会和上一句返回确认打架, 跳过。
-  if (!watcher.returned) {
-    showToast(message: "已打开邮件 App, 发送完成请手动返回 PicaComic".tl);
-  }
 }
 
 /// 等一次「App 回到前台」: 用户从邮件 App 手动返回时给一句确认, 随后立刻释放监听。
@@ -224,10 +222,6 @@ class _MailReturnWatcher {
 
   AppLifecycleListener? _listener;
   Timer? _guard;
-  bool _returned = false;
-
-  /// 是否已经回到过前台: 用来避免「已返回」和「请手动返回」两条提示互相矛盾。
-  bool get returned => _returned;
 
   void start() {
     if (_listener != null) {
@@ -239,7 +233,6 @@ class _MailReturnWatcher {
   }
 
   void _handleResume() {
-    _returned = true;
     _release();
     if (_mailReturnWatcher == this) {
       _mailReturnWatcher = null;
