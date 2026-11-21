@@ -150,8 +150,15 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       blockScreenshot();
     }
     PaintingBinding.instance.imageCache.maximumSizeBytes = 200 * 1024 * 1024;
-    // init() 已完成, 冷启动同步一次(没有配置 WebDAV 时直接跳过)
+    // init() 已完成, 冷启动同步由首屏渲染完成 5 秒后触发(没有配置 WebDAV 时直接跳过)
     SyncService.instance.onAppStarted();
+    // 启动安全阀: 首屏渲染完成 1 秒后把 launchGuard 标成 ok。
+    // 如果 App 在这之前就退出, 下次启动会认为上次异常退出并跳过自动同步。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Future.delayed(const Duration(seconds: 1), () {
+        unawaited(SyncService.instance.markLaunchOk());
+      });
+    });
     super.initState();
   }
 

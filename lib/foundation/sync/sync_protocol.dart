@@ -47,6 +47,15 @@ const Duration syncUploadDebounce = Duration(seconds: 5);
 /// 回到前台后距上次成功同步至少多久才再同步
 const Duration syncResumeMinInterval = Duration(minutes: 2);
 
+/// 冷启动自动同步: 首屏渲染完成后延迟多久再跑。
+/// 避免和首屏查询 + 详情页加载抢同一个 sqlite 连接。
+const Duration syncStartupDelay = Duration(seconds: 5);
+
+/// 启动安全阀: 进 init 时写 'starting', 首屏渲染完成后改成 'ok'。
+/// 下次启动发现还是 'starting' 就说明上一次启动没走到首屏, 本次跳过自动同步。
+const String syncLaunchGuardStarting = 'starting';
+const String syncLaunchGuardOk = 'ok';
+
 /// 删除墓碑保留时长, 超过后清理
 const Duration syncTombstoneRetention = Duration(days: 90);
 
@@ -181,6 +190,9 @@ class SyncState {
   /// 是否已经把远端旧格式快照当作一次远端快照合并过
   bool legacySeeded;
 
+  /// 启动安全阀标记: '' 从未记录 / 'starting' 启动中 / 'ok' 已到首屏
+  String launchGuard;
+
   /// 本机快照最后写入时间
   int ownUpdatedAt;
 
@@ -198,6 +210,7 @@ class SyncState {
     this.lastResult = '',
     this.lastError = '',
     this.legacySeeded = false,
+    this.launchGuard = '',
     this.ownUpdatedAt = 0,
     Map<String, SyncDeviceState>? devices,
     SyncStats? lastStats,
@@ -225,6 +238,7 @@ class SyncState {
       lastResult: json['lastResult'] as String? ?? '',
       lastError: json['lastError'] as String? ?? '',
       legacySeeded: json['legacySeeded'] as bool? ?? false,
+      launchGuard: json['launchGuard'] as String? ?? '',
       ownUpdatedAt: (json['ownUpdatedAt'] as num?)?.toInt() ?? 0,
       devices: devices,
       lastStats: rawStats is Map
@@ -258,6 +272,7 @@ class SyncState {
         'lastResult': lastResult,
         'lastError': lastError,
         'legacySeeded': legacySeeded,
+        'launchGuard': launchGuard,
         'ownUpdatedAt': ownUpdatedAt,
         'devices': {
           for (final entry in devices.entries) entry.key: entry.value.toJson(),

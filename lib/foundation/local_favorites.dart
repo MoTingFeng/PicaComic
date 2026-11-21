@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pica_comic/base.dart';
 import 'package:pica_comic/comic_source/comic_source.dart';
 import 'package:pica_comic/foundation/app.dart';
+import 'package:pica_comic/foundation/database_handle.dart';
 import 'package:pica_comic/foundation/image_manager.dart';
 import 'package:pica_comic/foundation/log.dart';
 import 'package:pica_comic/network/download.dart';
@@ -292,10 +293,20 @@ class LocalFavoritesManager {
 
   static LocalFavoritesManager? cache;
 
-  late Database _db;
+  /// 连接状态放在 DatabaseHandle 里: close/reopen 幂等, 关掉后再取会抛
+  /// StateError 而不是把已释放的句柄交给 sqlite3 原生层
+  late final DatabaseHandle _handle =
+      DatabaseHandle('${App.dataPath}/local_favorite.db');
+
+  /// 已打开的 local_favorite.db 连接。
+  ///
+  /// WebDAV 同步合并在它上面 ATTACH 远端库; 运行时不 dispose 这个连接。
+  Database get db => _handle.db;
+
+  Database get _db => _handle.db;
 
   Future<void> init() async {
-    _db = sqlite3.open("${App.dataPath}/local_favorite.db");
+    _handle.open();
     _checkAndCreate();
     await readData();
   }
@@ -371,15 +382,27 @@ class LocalFavoritesManager {
     }
   }
 
-  /// 同步合并会直接改 local_favorite.db, 合并前先关掉本进程的连接
+  /// 只给「数据导入/整库替换」这类需要独占数据库文件的场景, 同步路径不调用。
+  ///
+  /// 幂等: 重复调用不会二次 dispose 同一个 Database (原生 double free 的来源)。
   void closeForSync() {
-    _db.dispose();
+    _handle.close();
   }
 
-  /// 同步合并结束后重开连接、重建缓存并刷新界面
-  void refreshAfterSync() {
-    _db = sqlite3.open("${App.dataPath}/local_favorite.db");
+  /// 与 [closeForSync] 配对使用 (调用方要用 try/finally 保证配对);
+  /// 幂等: 没 close 过就什么也不做, 不会重复 open 出新连接。
+  void reopenAfterSync() {
+    if (!_handle.reopen()) {
+      return;
+    }
     _checkAndCreate();
+    _modifiedAfterLastCache = true;
+    updateUI();
+  }
+
+  /// 同步合并在同一个连接上写完之后调用: 作废收藏缓存并刷新界面,
+  /// 不关/不重开连接 (收藏夹名每次都是从表名现读的, 不需要重建)。
+  void refreshAfterSync() {
     _modifiedAfterLastCache = true;
     updateUI();
   }
@@ -828,9 +851,15 @@ class LocalFavoritesManager {
   }
 
   Future<void> clearAll() async {
-    _db.dispose();
-    File("${App.dataPath}/local_favorite.db").deleteSync();
-    await init();
+    // 整库重置属于「需要独占数据库文件」的少数场景: 只 close 一次 (幂等),
+    // 删库, 再在 finally 里配对新开一次 —— 不会二次 dispose 同一个 Database
+    closeForSync();
+    try {
+      File("${App.dataPath}/local_favorite.db").deleteSync();
+    } finally {
+      reopenAfterSync();
+    }
+    await readData();
     saveData();
   }
 

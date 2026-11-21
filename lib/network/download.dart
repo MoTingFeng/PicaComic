@@ -342,8 +342,9 @@ class DownloadManager with _DownloadDb implements Listenable {
       bytes < 0 ? "-1" : "${bytes ~/ (1024 * 1024)}";
 
   /// 下载目录里的文件数(递归)。递归枚举设了上限, 免得目录很大时
-  /// 每 5 秒全量扫一遍卡住主线程; 触到上限记成 "20000+"。
-  static const _dirFileCountLimit = 20000;
+  /// 每 5 秒全量扫一遍卡住主线程(实测两万文件会明显拖慢首屏);
+  /// 触到上限记成 "5000+"。
+  static const _dirFileCountLimit = 5000;
 
   String _downloadDirFileCount() {
     try {

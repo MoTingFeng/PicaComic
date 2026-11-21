@@ -13,6 +13,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:pica_comic/foundation/database_handle.dart';
 import 'package:pica_comic/foundation/sync/sync_merge.dart';
 import 'package:sqlite3/open.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -56,6 +57,8 @@ void main() {
     _testAppdataJsonTypes();
     _testProtocol();
     _testIdempotent('${dir.path}/history', '${dir.path}/favorites');
+    _testAttachEdgeCases('${dir.path}/attach');
+    _testDatabaseHandle('${dir.path}/handle');
   } finally {
     dir.deleteSync(recursive: true);
   }
@@ -129,7 +132,7 @@ void _testHistoryAndImages(String base) {
     create table image_tombstone (id TEXT, ep INTEGER, page INTEGER, deleted_at INTEGER,
       primary key (id, ep, page));
   ''');
-  local.dispose();
+  // 注意: 本地连接这里**不 dispose**, 模拟 App 里 HistoryManager 一直开着的连接
 
   final remote = sqlite3.open(remotePath);
   remote.execute(_historyDdl);
@@ -165,37 +168,74 @@ void _testHistoryAndImages(String base) {
   remote.execute(
       "insert into image_tombstone values ('img3', 1, 1, ?)", [now - 86400000]);
   remote.dispose();
+  final mergeLogs = <String>[];
   final stats = mergeHistoryDatabase(
-      localPath: localPath, remotePath: remotePath, nowMs: now);
+    local: local,
+    remotePath: remotePath,
+    nowMs: now,
+    log: (phase, ms) => mergeLogs.add('$phase(${ms}ms)'),
+  );
   // history 插入 C + image 插入 img4 = 2; history 更新 A + image 更新 img1 = 2
   _checkEquals('history 远端新增插入 1 + image 插入 1', stats.inserted, 2);
   _checkEquals('history 同 target 取新 1 + image 更新 1', stats.updated, 2);
   _checkEquals('history 本地更新时跳过 1', stats.skipped, 1);
   _checkEquals('image 墓碑删除 2', stats.deleted, 2);
-  final db = sqlite3.open(localPath);
-  final a = db.select("select * from history where target = 'targetA'").first;
+  // 关键: 合并用的就是上面那个 local 连接, 这里继续用它查询 —— 如果合并过程中
+  // 把连接 dispose 掉(4.10.1 的旧实现), 这里会直接抛 "database is disposed"
+  _check('合并后同一连接仍可查询(连接未被关闭)',
+      local.select('select count(*) c from history;').first['c'] is int);
+  final a = local.select("select * from history where target = 'targetA'").first;
   _checkEquals('A 取远端标题', a['title'], 'A(new)');
   _checkEquals('A 取远端页码', a['page'], 6);
   _checkEquals('A 的 readEpisode 取并集', a['readEpisode'], '1,2,3');
-  final b = db.select("select * from history where target = 'targetB'").first;
+  final b = local.select("select * from history where target = 'targetB'").first;
   _checkEquals('B 保留本地较新标题', b['title'], 'B(local newer)');
   _checkEquals('B 本地页码不变', b['page'], 9);
   _check('C 远端新增已插入',
-      db.select("select count(*) c from history where target = 'targetC'").first['c'] == 1);
+      local.select("select count(*) c from history where target = 'targetC'").first['c'] == 1);
   _check('D 本地独有保留',
-      db.select("select count(*) c from history where target = 'targetD'").first['c'] == 1);
-  _checkEquals('image img1 更新为远端', db.select(
+      local.select("select count(*) c from history where target = 'targetD'").first['c'] == 1);
+  _checkEquals('image img1 更新为远端', local.select(
           "select title from image_favorites where id = 'img1'").first['title'],
       'img1-title-new');
-  _check('image img4 插入', db.select(
+  _check('image img4 插入', local.select(
           "select count(*) c from image_favorites where id = 'img4'").first['c'] == 1);
-  _check('image img2 被远端墓碑删除', db.select(
+  _check('image img2 被远端墓碑删除', local.select(
           "select count(*) c from image_favorites where id = 'img2'").first['c'] == 0);
-  _check('image img3 被远端墓碑删除', db.select(
+  _check('image img3 被远端墓碑删除', local.select(
           "select count(*) c from image_favorites where id = 'img3'").first['c'] == 0);
-  _check('删除墓碑已同步到本地', db.select(
+  _check('删除墓碑已同步到本地', local.select(
           "select count(*) c from image_tombstone").first['c'] == 2);
-  db.dispose();
+
+  // 合并后在同一个连接上写入也正常(连接没换过, 事务已提交)
+  local.execute(
+      'insert into history values (?,?,?,?,?,?,?,?,?,?)',
+      ['targetE', 'E(after merge)', '', 'e.jpg', 900, 2, 1, 1, '1', 5]);
+  _check('合并后同一连接仍可写入',
+      local.select("select count(*) c from history where target = 'targetE'").first['c'] == 1);
+
+  // 日志回调: ATTACH / 提交 / DETACH 三个阶段都上报了
+  _check('合并日志包含 ATTACH/提交/DETACH',
+      mergeLogs.any((l) => l.contains('ATTACH')) &&
+          mergeLogs.any((l) => l.contains('提交')) &&
+          mergeLogs.any((l) => l.contains('DETACH')),
+      mergeLogs.join(' | '));
+
+  // 合并结束后远端库已经 DETACH
+  var remoteStillAttached = true;
+  try {
+    local.select('select name from remote.sqlite_master;');
+  } catch (_) {
+    remoteStillAttached = false;
+  }
+  _check('合并结束后远端库已 DETACH', !remoteStillAttached);
+  final attached = local
+      .select('pragma database_list;')
+      .map((row) => row['name'])
+      .toList();
+  _check('合并结束后只剩 main 一个库', attached.length == 1 && attached.first == 'main',
+      'attached=$attached');
+  local.dispose();
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +286,7 @@ void _testLocalFavorites(String base) {
   _addFavorite(local, '默认', 't2', '2026-02-01 00:00:00');
   _addFavorite(local, '默认', 't3', '2026-01-05 00:00:00');
   _addFavorite(local, '稍后再看', 't7', '2026-01-02 00:00:00');
-  local.dispose();
+  // 同 history: 本地连接保持打开, 合并不许把它关掉
 
   final remote = sqlite3.open(remotePath);
   _createFolder(remote, '默认');
@@ -270,36 +310,54 @@ void _testLocalFavorites(String base) {
       [DateTime(2026, 2, 10).millisecondsSinceEpoch]);
   remote.dispose();
 
+  final mergeLogs = <String>[];
   final stats = mergeLocalFavoritesDatabase(
-      localPath: localPath,
-      remotePath: remotePath,
-      nowMs: DateTime(2026, 3, 2).millisecondsSinceEpoch);
+    local: local,
+    remotePath: remotePath,
+    nowMs: DateTime(2026, 3, 2).millisecondsSinceEpoch,
+    log: (phase, ms) => mergeLogs.add('$phase(${ms}ms)'),
+  );
   _checkEquals('收藏 远端新增插入 2 (t4 + 新收藏夹 t6)', stats.inserted, 2);
   _checkEquals('收藏 同 target 取新 1 (t1)', stats.updated, 1);
   _checkEquals('收藏 本地更新跳过 1 (t2)', stats.skipped, 1);
   _checkEquals('收藏 删除墓碑生效 1 (t3)', stats.deleted, 1);
 
-  final db = sqlite3.open(localPath);
-  final t1 = db.select("select * from \"默认\" where target = 't1'").first;
+  _check('收藏合并后同一连接仍可查询(连接未被关闭)',
+      local.select('select count(*) c from sync_tombstone;').first['c'] is int);
+  final t1 = local.select("select * from \"默认\" where target = 't1'").first;
   _checkEquals('t1 取远端较新时间', t1['time'], '2026-03-01 00:00:00');
-  final t2 = db.select("select * from \"默认\" where target = 't2'").first;
+  final t2 = local.select("select * from \"默认\" where target = 't2'").first;
   _checkEquals('t2 保留本地时间', t2['time'], '2026-02-01 00:00:00');
-  _check('t4 已插入', db.select(
+  _check('t4 已插入', local.select(
           "select count(*) c from \"默认\" where target = 't4'").first['c'] == 1);
-  _check('t5 被墓碑挡住没有插入', db.select(
+  _check('t5 被墓碑挡住没有插入', local.select(
           "select count(*) c from \"默认\" where target = 't5'").first['c'] == 0);
-  _check('t3 被墓碑删除', db.select(
+  _check('t3 被墓碑删除', local.select(
           "select count(*) c from \"默认\" where target = 't3'").first['c'] == 0);
-  _check('本地独有收藏夹保留', db.select(
+  _check('本地独有收藏夹保留', local.select(
           "select count(*) c from \"稍后再看\"").first['c'] == 1);
-  _check('远端新收藏夹已建表并插入', db.select(
+  _check('远端新收藏夹已建表并插入', local.select(
           "select count(*) c from \"网络收藏\" where target = 't6'").first['c'] == 1);
-  _check('删除墓碑已同步到本地', db.select(
+  _check('删除墓碑已同步到本地', local.select(
           "select count(*) c from sync_tombstone").first['c'] == 2);
-  _check('新收藏夹顺序已合并', db.select(
+  _check('新收藏夹顺序已合并', local.select(
           "select order_value from folder_order where folder_name = '网络收藏'")
       .first['order_value'] == 2);
-  db.dispose();
+  _check('收藏合并日志包含 ATTACH 与 DETACH',
+      mergeLogs.any((l) => l.contains('ATTACH')) &&
+          mergeLogs.any((l) => l.contains('DETACH')),
+      mergeLogs.join(' | '));
+  // 合并后在同一个连接上写入也正常
+  _addFavorite(local, '稍后再看', 't8', '2026-04-01 00:00:00');
+  _check('收藏合并后同一连接仍可写入',
+      local.select("select count(*) c from \"稍后再看\"").first['c'] == 2);
+  final attached = local
+      .select('pragma database_list;')
+      .map((row) => row['name'])
+      .toList();
+  _check('收藏合并结束后只剩 main 一个库',
+      attached.length == 1 && attached.first == 'main', 'attached=$attached');
+  local.dispose();
 }
 
 void _createFolderSync(Database db) {
@@ -578,6 +636,7 @@ void _testProtocol() {
   final state = SyncState(deviceId: 'dev1')
     ..lastSyncAt = 456
     ..lastResult = 'ok'
+    ..launchGuard = syncLaunchGuardStarting
     ..devices['dev2'] = SyncDeviceState(eTag: 'etag', size: 12)
     ..lastStats = SyncStats.of(1, 2, 3, 4)
     ..pulledDevices = ['dev2'];
@@ -586,6 +645,11 @@ void _testProtocol() {
   _checkEquals('sync_state 回读 lastSyncAt', state2?.lastSyncAt, 456);
   _checkEquals('sync_state 回读设备 etag', state2?.devices['dev2']?.eTag, 'etag');
   _checkEquals('sync_state 回读合并计数', state2?.lastStats.deleted, 3);
+  _checkEquals('sync_state 回读启动标记', state2?.launchGuard, 'starting');
+  _check('旧 sync_state 没有启动标记时按空串处理',
+      SyncState.tryParse('{"deviceId":"dev1"}')?.launchGuard == '');
+  _check('冷启动自动同步延迟 5 秒',
+      syncStartupDelay == const Duration(seconds: 5));
 }
 
 // ---------------------------------------------------------------------------
@@ -594,19 +658,153 @@ void _testProtocol() {
 
 void _testIdempotent(String historyBase, String favoritesBase) {
   print('[idempotent]');
+  // 同一个连接连续合并两次: 第二次应当没有任何变化, 连接也一直可用
+  final historyDb = sqlite3.open('${historyBase}_local.db');
+  final firstHistory = mergeHistoryDatabase(
+    local: historyDb,
+    remotePath: '${historyBase}_remote.db',
+    nowMs: 1760000000000,
+  );
+  _checkEquals('历史记录首次合并(幂等基线)无插入', firstHistory.inserted, 0);
   final historyStats = mergeHistoryDatabase(
-    localPath: '${historyBase}_local.db',
+    local: historyDb,
     remotePath: '${historyBase}_remote.db',
     nowMs: 1760000000000,
   );
   _checkEquals('历史记录二次合并没有插入', historyStats.inserted, 0);
   _checkEquals('历史记录二次合并没有更新', historyStats.updated, 0);
+  _check('历史记录二次合并后同一连接可查询',
+      historyDb.select('select count(*) c from history;').first['c'] is int);
+  historyDb.dispose();
+
+  final favoritesDb = sqlite3.open('${favoritesBase}_local.db');
+  mergeLocalFavoritesDatabase(
+    local: favoritesDb,
+    remotePath: '${favoritesBase}_remote.db',
+    nowMs: DateTime(2026, 3, 2).millisecondsSinceEpoch,
+  );
   final favoritesStats = mergeLocalFavoritesDatabase(
-    localPath: '${favoritesBase}_local.db',
+    local: favoritesDb,
     remotePath: '${favoritesBase}_remote.db',
     nowMs: DateTime(2026, 3, 2).millisecondsSinceEpoch,
   );
   _checkEquals('收藏二次合并没有插入', favoritesStats.inserted, 0);
   _checkEquals('收藏二次合并没有更新', favoritesStats.updated, 0);
   _checkEquals('收藏二次合并没有删除', favoritesStats.deleted, 0);
+  _check('收藏二次合并后同一连接可查询',
+      favoritesDb.select('select count(*) c from sync_tombstone;').first['c'] is int);
+  favoritesDb.dispose();
 }
+
+// ---------------------------------------------------------------------------
+// ATTACH 边界: 远端库缺失 / 损坏时不能把本地连接带坏
+// ---------------------------------------------------------------------------
+
+void _testAttachEdgeCases(String base) {
+  print('[attach edge cases]');
+  final localPath = '${base}_local.db';
+  final local = sqlite3.open(localPath);
+  local.execute(_historyDdl);
+  local.execute('insert into history values (?,?,?,?,?,?,?,?,?,?)',
+      ['targetA', 'A(local)', '', 'a.jpg', 100, 2, 3, 5, '1,2', 20]);
+
+  // 1) 远端 db 不存在: 空合并, 连接不受影响
+  final missingStats = mergeHistoryDatabase(
+    local: local,
+    remotePath: '${base}_not_exists.db',
+    nowMs: 1760000000000,
+  );
+  _check('远端 db 缺失时合计数为 0',
+      missingStats.inserted == 0 && missingStats.updated == 0);
+  _check('远端 db 缺失后本地连接可查询',
+      local.select('select count(*) c from history;').first['c'] == 1);
+  var stillAttached = true;
+  try {
+    local.select('select name from remote.sqlite_master;');
+  } catch (_) {
+    stillAttached = false;
+  }
+  _check('远端 db 缺失时没有残留 attach', !stillAttached);
+
+  // 2) 远端"db"是垃圾文件: 当作没有远端数据, 连接必须还能用
+  final brokenPath = '${base}_broken.db';
+  File(brokenPath).writeAsBytesSync(List<int>.generate(4096, (i) => i % 251));
+  final brokenStats = mergeHistoryDatabase(
+    local: local,
+    remotePath: brokenPath,
+    nowMs: 1760000000000,
+  );
+  _check('远端 db 损坏时合计数为 0',
+      brokenStats.inserted == 0 && brokenStats.updated == 0);
+  _check('远端 db 损坏后本地连接可查询/可写',
+      local.select('select count(*) c from history;').first['c'] == 1);
+  local.execute('insert into history values (?,?,?,?,?,?,?,?,?,?)',
+      ['targetB', 'B(after broken)', '', 'b.jpg', 200, 2, 1, 1, '1', 5]);
+  _check('远端 db 损坏后本地仍可写入',
+      local.select('select count(*) c from history;').first['c'] == 2);
+  stillAttached = true;
+  try {
+    local.select('select name from remote.sqlite_master;');
+  } catch (_) {
+    stillAttached = false;
+  }
+  _check('远端 db 损坏时没有残留 attach', !stillAttached);
+  local.dispose();
+}
+
+// ---------------------------------------------------------------------------
+// DatabaseHandle: close/reopen 幂等, 不会二次 dispose 同一个 Database
+// ---------------------------------------------------------------------------
+
+void _testDatabaseHandle(String base) {
+  print('[database handle]');
+  final handle = DatabaseHandle('$base.db');
+  _check('初始状态未打开', !handle.isOpen);
+
+  final db = handle.open();
+  db.execute('create table t (id text primary key);');
+  db.execute("insert into t values ('a');");
+  _check('open 后 isOpen', handle.isOpen);
+  _check('重复 open 返回同一个连接', identical(handle.open(), db));
+
+  _check('第一次 close 真的 dispose', handle.close() == true);
+  _check('close 后 isOpen=false', !handle.isOpen);
+  _check('第二次 close 不会二次 dispose', handle.close() == false);
+  var stateError = false;
+  try {
+    handle.db;
+  } on StateError {
+    stateError = true;
+  }
+  _check('close 后取连接抛 StateError(不把已释放句柄交给原生层)', stateError);
+
+  _check('reopen 真的重开', handle.reopen() == true);
+  _check('重开后数据还在',
+      handle.db.select('select count(*) c from t;').first['c'] == 1);
+  _check('已经打开时 reopen 不会重复 open', handle.reopen() == false);
+  _check('第二次 close(重开过的连接) 也正常', handle.close() == true);
+  _check('已关闭后第三次 close 仍返回 false', handle.close() == false);
+
+  // 参考: 直接对 sqlite3 包的 Database 二次 dispose 会怎样 (包 2.1.0 内有
+  // _isClosed 守卫, 第二次直接 return)。即使包本身忽略二次 dispose,
+  // 真正踩坑的是"关闭后仍被 UI 使用"的路径, 所以 manager 层必须先拦住。
+  final raw = sqlite3.open('${base}_raw.db');
+  raw.execute('create table t (id text);');
+  var rawDoubleDisposeThrew = false;
+  try {
+    raw.dispose();
+    raw.dispose();
+  } catch (_) {
+    rawDoubleDisposeThrew = true;
+  }
+  _check('sqlite3 ${sqlite3.version.libVersion} 二次 dispose 不抛异常',
+      !rawDoubleDisposeThrew);
+  var rawUseAfterDisposeThrows = false;
+  try {
+    raw.select('select 1;');
+  } catch (_) {
+    rawUseAfterDisposeThrows = true;
+  }
+  _check('sqlite3 包 dispose 后查询会抛错', rawUseAfterDisposeThrows);
+}
+

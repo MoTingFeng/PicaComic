@@ -23,17 +23,102 @@ export 'sync_protocol.dart';
 // 通用小工具
 // ---------------------------------------------------------------------------
 
-Database _openLocal(String path) => sqlite3.open(path);
+/// 一条「ATTACH 合并」阶段日志: (阶段名, 距本次合并开始的毫秒数)
+typedef SyncMergeLog = void Function(String phase, int elapsedMs);
 
-Database? _openRemote(String path) {
-  if (!File(path).existsSync()) {
-    return null;
+/// ATTACH 远端库用的 schema 别名
+const String _remoteSchema = 'remote';
+
+/// 拼 SQL 字符串字面量, 只需要处理文件路径里可能出现的单引号
+String _sqlString(String value) => "'${value.replaceAll("'", "''")}'";
+
+/// 在本地已经打开的连接 [db] 上 ATTACH 远端库文件, 返回是否成功。
+///
+/// 远端库是快照解压到缓存目录的一次性副本, 这里只读不写, 不会关闭 [db],
+/// 也不会动用户的远端快照 / 本地数据库文件。
+bool _attachRemote(Database db, String remotePath) {
+  if (!File(remotePath).existsSync()) {
+    return false;
   }
+  // 上一次合并如果异常中断导致 DETACH 没跑成功, 别名会被一直占着, 先清掉
   try {
-    return sqlite3.open(path, mode: OpenMode.readOnly);
+    db.execute('detach database $_remoteSchema;');
+  } catch (_) {}
+  try {
+    db.execute('attach database ${_sqlString(remotePath)} as $_remoteSchema;');
+    return true;
   } catch (_) {
-    return null;
+    // 不是有效的 sqlite 文件 / 打不开: 当作没有远端数据(旧实现也是空合并),
+    // 不能让一个坏快照拖垮整轮同步
+    _detachRemote(db);
+    return false;
   }
+}
+
+/// DETACH 远端库。失败只忽略: 合并结果已经提交, 残留的 attach 下次合并前会清掉
+void _detachRemote(Database db) {
+  try {
+    db.execute('detach database $_remoteSchema;');
+  } catch (_) {}
+}
+
+void _rollback(Database db) {
+  try {
+    db.execute('rollback;');
+  } catch (_) {}
+}
+
+/// ATTACH 出来的远端库的只读入口。
+///
+/// 所有查询都限定在 `remote.` 这个 schema 上, 底层仍然是 [db] 这一个本地连接,
+/// 因此合并期间本地连接不会被关闭或重新打开 (4.10.1 冷启动闪退的根因就是运行时
+/// dispose 连接: ImageFavoriteManager 复用 HistoryManager 的 _db, 关掉后再被 UI
+/// 查询会踩到已释放的原生句柄)。
+class _AttachedRemote {
+  final Database db;
+
+  const _AttachedRemote(this.db);
+
+  List<String> tableNames() {
+    try {
+      return db
+          .select(
+              "select name from $_remoteSchema.sqlite_master where type='table';")
+          .map((row) => row['name'].toString())
+          .toList();
+    } catch (_) {
+      return <String>[];
+    }
+  }
+
+  bool hasTable(String name) {
+    try {
+      return db
+          .select(
+              "select name from $_remoteSchema.sqlite_master where type='table' and name=?;",
+              [name])
+          .isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Set<String> columns(String table) {
+    if (!hasTable(table)) {
+      return <String>{};
+    }
+    try {
+      return db
+          .select('PRAGMA $_remoteSchema.table_info("$table");')
+          .map((row) => row['name'].toString())
+          .toSet();
+    } catch (_) {
+      return <String>{};
+    }
+  }
+
+  ResultSet rows(String table) =>
+      db.select('select * from $_remoteSchema."$table";');
 }
 
 Map<String, dynamic> _rowMap(Row row) => Map<String, dynamic>.from(row);
@@ -82,25 +167,40 @@ Set<String> _columns(Database db, String table) {
 // history.db: 历史记录 + 图片收藏
 // ---------------------------------------------------------------------------
 
-/// 合并历史记录表与图片收藏表。localPath 会被就地修改。
+/// 合并历史记录表与图片收藏表。
+///
+/// [local] 是调用方**已经打开**的 history.db 连接 (HistoryManager 那一个),
+/// 本函数只在它上面 ATTACH 远端库并写本地库, 整个过程不关闭、不重开连接。
+/// [remotePath] 是下载快照解压出来的一次性副本, 只读不写。
 SyncStats mergeHistoryDatabase({
-  required String localPath,
+  required Database local,
   required String remotePath,
   required int nowMs,
+  SyncMergeLog? log,
 }) {
   final stats = SyncStats();
-  final remote = _openRemote(remotePath);
-  if (remote == null) {
+  final startedAt = DateTime.now();
+  int elapsedMs() => DateTime.now().difference(startedAt).inMilliseconds;
+  if (!_attachRemote(local, remotePath)) {
     return stats;
   }
-  final local = _openLocal(localPath);
+  log?.call('ATTACH 远端 history.db', elapsedMs());
+  final remote = _AttachedRemote(local);
   try {
-    _ensureHistorySchema(local);
-    _mergeHistoryTable(local, remote, stats);
-    _mergeImageFavorites(local, remote, stats, nowMs);
+    local.execute('begin immediate;');
+    try {
+      _ensureHistorySchema(local);
+      _mergeHistoryTable(local, remote, stats);
+      _mergeImageFavorites(local, remote, stats, nowMs);
+      local.execute('commit;');
+      log?.call('合并事务已提交', elapsedMs());
+    } catch (_) {
+      _rollback(local);
+      rethrow;
+    }
   } finally {
-    remote.dispose();
-    local.dispose();
+    _detachRemote(local);
+    log?.call('DETACH 远端 history.db', elapsedMs());
   }
   return stats;
 }
@@ -148,11 +248,12 @@ void _ensureHistorySchema(Database db) {
   """);
 }
 
-void _mergeHistoryTable(Database local, Database remote, SyncStats stats) {
-  if (!_tableExists(remote, 'history')) {
+void _mergeHistoryTable(
+    Database local, _AttachedRemote remote, SyncStats stats) {
+  if (!remote.hasTable('history')) {
     return;
   }
-  final remoteHasMaxPage = _columns(remote, 'history').contains('max_page');
+  final remoteHasMaxPage = remote.columns('history').contains('max_page');
   final localRows = <String, Map<String, dynamic>>{};
   for (final row in local.select('select * from history;')) {
     final data = _rowMap(row);
@@ -161,7 +262,7 @@ void _mergeHistoryTable(Database local, Database remote, SyncStats stats) {
       localRows[target] = data;
     }
   }
-  for (final row in remote.select('select * from history;')) {
+  for (final row in remote.rows('history')) {
     final data = _rowMap(row);
     final target = _str(data['target']);
     if (target.isEmpty) {
@@ -231,12 +332,11 @@ String _unionEpisodes(String a, String b) {
 String _imageKey(dynamic id, int ep, int page) => '$id\u0000$ep\u0000$page';
 
 void _mergeImageFavorites(
-    Database local, Database remote, SyncStats stats, int nowMs) {
-  if (!_tableExists(remote, 'image_favorites')) {
+    Database local, _AttachedRemote remote, SyncStats stats, int nowMs) {
+  if (!remote.hasTable('image_favorites')) {
     return;
   }
-  final remoteHasUpdatedAt =
-      _columns(remote, 'image_favorites').contains('updatedAt');
+  final remoteHasUpdatedAt = remote.columns('image_favorites').contains('updatedAt');
 
   final localRows = <String, Map<String, dynamic>>{};
   for (final row in local.select('select * from image_favorites;')) {
@@ -245,7 +345,7 @@ void _mergeImageFavorites(
         data;
   }
   final remoteRows = <String, Map<String, dynamic>>{};
-  for (final row in remote.select('select * from image_favorites;')) {
+  for (final row in remote.rows('image_favorites')) {
     final data = _rowMap(row);
     remoteRows[_imageKey(data['id'], _int(data['ep']), _int(data['page']))] =
         data;
@@ -257,8 +357,8 @@ void _mergeImageFavorites(
     final key = _imageKey(row['id'], _int(row['ep']), _int(row['page']));
     tombstones[key] = _int(row['deleted_at']);
   }
-  if (_tableExists(remote, 'image_tombstone')) {
-    for (final row in remote.select('select * from image_tombstone;')) {
+  if (remote.hasTable('image_tombstone')) {
+    for (final row in remote.rows('image_tombstone')) {
       final key = _imageKey(row['id'], _int(row['ep']), _int(row['page']));
       final at = _int(row['deleted_at']);
       if (at > (tombstones[key] ?? 0)) {
@@ -371,42 +471,58 @@ const String _folderTableSql = '''
 ''';
 
 /// 合并本地收藏库 (各收藏夹子表 + folder_order + folder_sync + 删除墓碑)。
-/// localPath 会被就地修改。
+///
+/// [local] 是调用方**已经打开**的 local_favorite.db 连接, 本函数只在它上面
+/// ATTACH 远端库并写本地库, 不关闭、不重开连接。[remotePath] 是快照解压副本。
 SyncStats mergeLocalFavoritesDatabase({
-  required String localPath,
+  required Database local,
   required String remotePath,
   required int nowMs,
+  SyncMergeLog? log,
 }) {
   final stats = SyncStats();
-  final remote = _openRemote(remotePath);
-  if (remote == null) {
+  final startedAt = DateTime.now();
+  int elapsedMs() => DateTime.now().difference(startedAt).inMilliseconds;
+  if (!_attachRemote(local, remotePath)) {
     return stats;
   }
-  final local = _openLocal(localPath);
+  log?.call('ATTACH 远端 local_favorite.db', elapsedMs());
+  final remote = _AttachedRemote(local);
   try {
-    local.execute("""
-      create table if not exists sync_tombstone (
-        target TEXT,
-        type INTEGER,
-        folder TEXT,
-        deleted_at INTEGER,
-        primary key (target, type, folder)
-      );
-    """);
-    final tombstones = _mergeFavoriteTombstones(local, remote);
-    _mergeFolderOrder(local, remote);
-    final folders = <String>{..._favoriteFolders(local), ..._favoriteFolders(remote)};
-    for (final folder in folders) {
-      if (!_tableExists(local, folder)) {
-        local.execute(_folderTableSql.replaceFirst('__folder__', folder));
+    local.execute('begin immediate;');
+    try {
+      local.execute("""
+        create table if not exists sync_tombstone (
+          target TEXT,
+          type INTEGER,
+          folder TEXT,
+          deleted_at INTEGER,
+          primary key (target, type, folder)
+        );
+      """);
+      final tombstones = _mergeFavoriteTombstones(local, remote);
+      _mergeFolderOrder(local, remote);
+      final folders = <String>{
+        ..._favoriteFolders(local),
+        ...remote.tableNames().where((name) => !_systemFavoriteTables.contains(name)),
+      };
+      for (final folder in folders) {
+        if (!_tableExists(local, folder)) {
+          local.execute(_folderTableSql.replaceFirst('__folder__', folder));
+        }
+        _mergeFavoriteFolder(local, remote, folder, tombstones, stats);
       }
-      _mergeFavoriteFolder(local, remote, folder, tombstones, stats);
+      _mergeFolderSync(local, remote);
+      _purgeFavoriteTombstones(local, nowMs);
+      local.execute('commit;');
+      log?.call('合并事务已提交', elapsedMs());
+    } catch (_) {
+      _rollback(local);
+      rethrow;
     }
-    _mergeFolderSync(local, remote);
-    _purgeFavoriteTombstones(local, nowMs);
   } finally {
-    remote.dispose();
-    local.dispose();
+    _detachRemote(local);
+    log?.call('DETACH 远端 local_favorite.db', elapsedMs());
   }
   return stats;
 }
@@ -427,15 +543,16 @@ List<String> _favoriteFolders(Database db) {
   return names;
 }
 
-Map<String, int> _mergeFavoriteTombstones(Database local, Database remote) {
+Map<String, int> _mergeFavoriteTombstones(
+    Database local, _AttachedRemote remote) {
   final tombstones = <String, int>{};
   for (final row in local.select('select * from sync_tombstone;')) {
     tombstones[_favoriteTombstoneKey(row)] = _int(row['deleted_at']);
   }
-  if (!_tableExists(remote, 'sync_tombstone')) {
+  if (!remote.hasTable('sync_tombstone')) {
     return tombstones;
   }
-  for (final row in remote.select('select * from sync_tombstone;')) {
+  for (final row in remote.rows('sync_tombstone')) {
     final key = _favoriteTombstoneKey(row);
     final at = _int(row['deleted_at']);
     if (at > (tombstones[key] ?? 0)) {
@@ -456,8 +573,8 @@ String _favoriteTombstoneKey(Row row) =>
 String _favoriteKey(String folder, String target, int type) =>
     '$folder\u0000$target\u0000$type';
 
-void _mergeFolderOrder(Database local, Database remote) {
-  if (!_tableExists(remote, 'folder_order')) {
+void _mergeFolderOrder(Database local, _AttachedRemote remote) {
+  if (!remote.hasTable('folder_order')) {
     return;
   }
   final localOrder = <String, int>{};
@@ -469,7 +586,7 @@ void _mergeFolderOrder(Database local, Database remote) {
     local.execute(
         'create table folder_order (folder_name text primary key, order_value int);');
   }
-  for (final row in remote.select('select * from folder_order;')) {
+  for (final row in remote.rows('folder_order')) {
     final folder = _str(row['folder_name']);
     if (folder.isEmpty) {
       continue;
@@ -484,9 +601,9 @@ void _mergeFolderOrder(Database local, Database remote) {
   }
 }
 
-void _mergeFavoriteFolder(Database local, Database remote, String folder,
-    Map<String, int> tombstones, SyncStats stats) {
-  if (!_tableExists(remote, folder)) {
+void _mergeFavoriteFolder(Database local, _AttachedRemote remote,
+    String folder, Map<String, int> tombstones, SyncStats stats) {
+  if (!remote.hasTable(folder)) {
     return;
   }
   final localRows = <String, Map<String, dynamic>>{};
@@ -496,7 +613,7 @@ void _mergeFavoriteFolder(Database local, Database remote, String folder,
         data;
   }
   final remoteRows = <String, Map<String, dynamic>>{};
-  for (final row in remote.select('select * from "$folder";')) {
+  for (final row in remote.rows(folder)) {
     final data = _rowMap(row);
     remoteRows[_favoriteKey(folder, _str(data['target']), _int(data['type']))] =
         data;
@@ -588,8 +705,8 @@ void _updateFavorite(Database db, String folder, Map<String, dynamic> row) {
   );
 }
 
-void _mergeFolderSync(Database local, Database remote) {
-  if (!_tableExists(remote, 'folder_sync')) {
+void _mergeFolderSync(Database local, _AttachedRemote remote) {
+  if (!remote.hasTable('folder_sync')) {
     return;
   }
   if (!_tableExists(local, 'folder_sync')) {
@@ -606,7 +723,7 @@ void _mergeFolderSync(Database local, Database remote) {
       .select('select folder_name from folder_sync;')
       .map((row) => _str(row['folder_name']))
       .toSet();
-  for (final row in remote.select('select * from folder_sync;')) {
+  for (final row in remote.rows('folder_sync')) {
     final folder = _str(row['folder_name']);
     if (folder.isEmpty || localFolders.contains(folder)) {
       continue;

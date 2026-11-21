@@ -110,13 +110,17 @@ class SyncService {
 
   Timer? _uploadTimer;
 
+  /// 首屏渲染完成后的冷启动同步延时器
+  Timer? _startupTimer;
+
+  /// 上次启动写了 'starting' 却没走到首屏(异常退出): 本次不自动同步
+  bool _previousLaunchUnclean = false;
+
   bool _syncing = false;
 
   bool _pendingUpload = false;
 
   bool _initialized = false;
-
-  bool _databasesClosed = false;
 
   File get _stateFile => File('${App.dataPath}/sync_state.json');
 
@@ -146,29 +150,81 @@ class SyncService {
           SyncState(deviceId: '');
       if (_state.deviceId.isEmpty) {
         _state.deviceId = const Uuid().v4();
-        await _saveState();
       }
+      // 启动安全阀: sync_state 里还是 'starting' 说明上次启动没走到首屏就退出了
+      _previousLaunchUnclean = _state.launchGuard == syncLaunchGuardStarting;
+      _state.launchGuard = syncLaunchGuardStarting;
+      await _saveState();
       ReadPositionStore.instance.onChanged = markDirty;
       LogManager.addLog(LogLevel.info, 'Sync',
-          'Sync: init deviceId=${_state.deviceId} lastSync=${_state.lastSyncAt}');
+          'Sync: init deviceId=${_state.deviceId} lastSync=${_state.lastSyncAt} previousLaunchUnclean=$_previousLaunchUnclean');
+      if (_previousLaunchUnclean) {
+        LogManager.addLog(LogLevel.warning, 'Sync',
+            'Sync: 上次启动未到首屏就退出(launchGuard 仍是 starting), 本次跳过自动同步, 手动同步不受影响');
+      }
     } catch (e, s) {
       LogManager.addLog(LogLevel.error, 'Sync', 'Sync: init 失败\n$e\n$s');
     }
   }
 
-  /// init 完成后触发一次同步 (冷启动拉取, 不再等 2 小时)
+  /// 首屏渲染完成后调用 (main.dart): 把启动标记改成 ok。
+  /// 下次启动读到的就不是 'starting', 不会误判成异常退出。
+  Future<void> markLaunchOk() async {
+    await init();
+    if (_state.launchGuard == syncLaunchGuardOk) {
+      return;
+    }
+    _state.launchGuard = syncLaunchGuardOk;
+    await _saveState();
+    LogManager.addLog(
+        LogLevel.info, 'Sync', 'Sync: launchGuard=ok (首屏已渲染)');
+  }
+
+  /// 冷启动自动同步: 首屏渲染完成后再延迟 [syncStartupDelay] 秒,
+  /// 避免和首屏查询/详情页加载同时打本地数据库。
+  /// 上次启动异常退出(launchGuard 仍是 starting)时本次跳过。
   void onAppStarted() {
+    if (!isConfigured) {
+      return;
+    }
+    if (_previousLaunchUnclean) {
+      LogManager.addLog(LogLevel.warning, 'Sync',
+          'Sync: 上次启动异常退出, 本次不自动同步(设置页可手动同步)');
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!isConfigured) {
-        return;
-      }
-      unawaited(syncNow());
+      _startupTimer?.cancel();
+      _startupTimer = Timer(syncStartupDelay, () {
+        _startupTimer = null;
+        if (!isConfigured) {
+          return;
+        }
+        LogManager.addLog(
+            LogLevel.info,
+            'Sync',
+            'Sync: 首屏稳定 ${syncStartupDelay.inSeconds}s, 开始自动同步');
+        unawaited(_runStartupSync());
+      });
     });
   }
 
-  /// 回到前台: 距上次成功同步超过 2 分钟才再同步
+  /// 自动同步期间也挂上启动标记: 如果同步把进程搞崩, 下次启动会看到
+  /// starting 而跳过自动同步, 保证 App 至少能正常进首屏一次。
+  Future<void> _runStartupSync() async {
+    _state.launchGuard = syncLaunchGuardStarting;
+    await _saveState();
+    try {
+      await syncNow();
+    } finally {
+      _state.launchGuard = syncLaunchGuardOk;
+      await _saveState();
+    }
+  }
+
+  /// 回到前台: 距上次成功同步超过 2 分钟才再同步。
+  /// 上次启动异常退出时本次不自动同步 (设置页的手动同步不受影响)。
   void onAppResumed() {
-    if (!isConfigured) {
+    if (!isConfigured || _previousLaunchUnclean) {
       return;
     }
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -268,10 +324,16 @@ class SyncService {
       recordLocalChanges();
       ReadPositionStore.instance.saveToFile();
 
+      var phaseStart = DateTime.now();
       final candidates = await _findCandidates(cfg);
       final legacyName = await _findLegacySnapshot(cfg);
+      _logStage(
+          '拉取远端设备列表 candidates=${candidates.length} legacy=${legacyName != null}',
+          phaseStart);
       if (candidates.isEmpty && legacyName == null) {
+        phaseStart = DateTime.now();
         final uploaded = await _uploadSnapshot(cfg);
+        _logStage('没有新的远端快照, 重写本机快照', phaseStart);
         _state.lastSyncAt = DateTime.now().millisecondsSinceEpoch;
         _state.lastResult = uploaded ? 'ok' : 'failed';
         _state.pulledDevices = const [];
@@ -289,7 +351,9 @@ class SyncService {
       workDir.createSync(recursive: true);
 
       final snapshots = <_RemoteSnapshot>[];
-      for (final candidate in candidates) {
+      for (var index = 0; index < candidates.length; index++) {
+        final candidate = candidates[index];
+        phaseStart = DateTime.now();
         snapshots.add(await _downloadSnapshot(
           cfg,
           '$syncDevicesDirName/${deviceSnapshotName(candidate.deviceId)}',
@@ -299,10 +363,12 @@ class SyncService {
           size: candidate.size,
           mTime: candidate.mTime,
         ));
-        LogManager.addLog(
-            LogLevel.info, 'Sync', 'Sync: 下载设备快照 ${candidate.deviceId}');
+        _logStage(
+            '下载快照 ${index + 1}/${candidates.length} ${candidate.deviceId}',
+            phaseStart);
       }
       if (legacyName != null) {
+        phaseStart = DateTime.now();
         snapshots.add(await _downloadSnapshot(
           cfg,
           legacyName,
@@ -310,45 +376,70 @@ class SyncService {
           workDir,
           legacyVersion: legacySnapshotVersion(legacyName),
         ));
+        _logStage('下载旧格式快照 $legacyName', phaseStart);
         LogManager.addLog(LogLevel.info, 'Sync',
             'Sync: 首次升级, 把旧格式快照 $legacyName 当作远端快照');
       }
 
+      phaseStart = DateTime.now();
       backupDir = await _backupLocalData();
+      _logStage('合并前备份', phaseStart);
 
-      // sqlite 合并: 先关掉本进程的连接, 合并完重开
+      // sqlite 合并: 在本地已经打开的连接上 ATTACH 远端库做合并,
+      // 全程不关闭/不重开 history.db 与 local_favorite.db
+      final historyDb = HistoryManager().db;
+      final favoritesDb = LocalFavoritesManager().db;
+      phaseStart = DateTime.now();
       try {
-        _closeLocalDatabases();
+        LogManager.addLog(
+            LogLevel.info,
+            'Sync',
+            'Sync: 合并前 在已打开的本地连接上 ATTACH 合并 ${snapshots.length} 个远端快照');
         for (final snapshot in snapshots) {
-          stats.add(mergeHistoryDatabase(
-            localPath: '${App.dataPath}/$syncHistoryDbFileName',
+          final deviceStart = DateTime.now();
+          final historyStats = mergeHistoryDatabase(
+            local: historyDb,
             remotePath: '${snapshot.dir}/$syncHistoryDbFileName',
             nowMs: DateTime.now().millisecondsSinceEpoch,
-          ));
-          stats.add(mergeLocalFavoritesDatabase(
-            localPath: '${App.dataPath}/$syncLocalFavoritesDbFileName',
+            log: (phase, ms) => LogManager.addLog(LogLevel.info, 'Sync',
+                'Sync: history.db $phase ${snapshot.deviceId} 耗时 ${ms}ms'),
+          );
+          final favoriteStats = mergeLocalFavoritesDatabase(
+            local: favoritesDb,
             remotePath: '${snapshot.dir}/$syncLocalFavoritesDbFileName',
             nowMs: DateTime.now().millisecondsSinceEpoch,
-          ));
+            log: (phase, ms) => LogManager.addLog(LogLevel.info, 'Sync',
+                'Sync: local_favorite.db $phase ${snapshot.deviceId} 耗时 ${ms}ms'),
+          );
+          stats.add(historyStats);
+          stats.add(favoriteStats);
           pulled.add(snapshot.deviceId);
-          LogManager.addLog(LogLevel.info, 'Sync',
-              'Sync: 合并设备 ${snapshot.deviceId} 的数据');
+          _logStage(
+              '合并设备 ${snapshot.deviceId} 完成',
+              deviceStart,
+              extra: 'history[插 ${historyStats.inserted} 更 ${historyStats.updated} 删 ${historyStats.deleted}] '
+                  'favorites[插 ${favoriteStats.inserted} 更 ${favoriteStats.updated} 删 ${favoriteStats.deleted}]');
         }
+        _logStage('sqlite 合并全部完成', phaseStart);
       } catch (e, s) {
         mergeError = e.toString();
+        // 每个快照的合并都在事务里, 失败时已 ROLLBACK, 本地连接没被动过;
+        // 不再用文件级备份覆盖正在打开的数据库 (那样才是不安全的)
         LogManager.addLog(
-            LogLevel.error, 'Sync', 'Sync: 合并失败, 准备用备份还原\n$e\n$s');
+            LogLevel.error, 'Sync', 'Sync: 合并失败(已回滚, 本地连接未关闭)\n$e\n$s');
       } finally {
-        _reopenLocalDatabases();
+        // 合并直接改了本地库, 缓存要作废; 连接没关, 不需要重开
+        _refreshLocalCaches();
       }
 
       if (mergeError.isNotEmpty) {
-        _closeLocalDatabases();
-        await _restoreBackup(backupDir);
-        _reopenLocalDatabases();
         _state.lastResult = 'failed';
         _state.lastError = 'merge: $mergeError';
+        _state.pulledDevices = pulled;
+        _state.lastStats = stats.clone();
         await _saveState();
+        LogManager.addLog(LogLevel.warning, 'Sync',
+            'Sync: 同步失败(合并阶段), 已合并 ${pulled.length} 台设备, 合并前备份保留在 $backupDir');
         return SyncResult.failure(mergeError);
       }
 
@@ -362,6 +453,7 @@ class SyncService {
       }
 
       // 阅读位置合并
+      phaseStart = DateTime.now();
       var positions = ReadPositionStore.instance.exportForSync();
       for (final snapshot in snapshots) {
         final file = File('${snapshot.dir}/$syncReadPositionsFileName');
@@ -375,8 +467,10 @@ class SyncService {
           maxTargets: ReadPositionStore.maxTargets,
           maxEps: ReadPositionStore.maxEps);
       ReadPositionStore.instance.applyMerged(positions);
+      _logStage('合并阅读位置', phaseStart);
 
       // 设置与 appdata 合并
+      phaseStart = DateTime.now();
       var settings = appdata.settings;
       var settingsMeta = _settingsMeta;
       var mergedAppdata = appdata.toJson();
@@ -432,8 +526,10 @@ class SyncService {
         _saveSettingsMeta();
         _settingsBaseline = List<String>.from(appdata.settings);
       }
+      _logStage('合并设置与 appdata', phaseStart);
 
       // comic_source 按内容 hash 取新
+      phaseStart = DateTime.now();
       var comicSourceChanged = false;
       for (final snapshot in snapshots) {
         final result = await _mergeComicSource(snapshot);
@@ -450,9 +546,12 @@ class SyncService {
               LogLevel.error, 'Sync', 'Sync: 重新加载漫画源失败\n$e\n$s');
         }
       }
+      _logStage('合并漫画源 comicSourceChanged=$comicSourceChanged', phaseStart);
 
       // 重写自己的快照 + 记录各设备状态
+      phaseStart = DateTime.now();
       final uploaded = await _uploadSnapshot(cfg);
+      _logStage('重写本机快照(上传)', phaseStart);
       for (final snapshot in snapshots) {
         _state.devices[snapshot.deviceId] = SyncDeviceState(
           eTag: snapshot.eTag,
@@ -765,62 +864,26 @@ class SyncService {
     }
   }
 
-  Future<void> _restoreBackup(String dirPath) async {
-    if (dirPath.isEmpty) {
-      return;
-    }
-    try {
-      final dir = Directory(dirPath);
-      if (!dir.existsSync()) {
-        return;
-      }
-      for (final entry in dir.listSync()) {
-        if (entry is File) {
-          await entry.copy('${App.dataPath}/${entry.uri.pathSegments.last}');
-        }
-      }
-      LogManager.addLog(
-          LogLevel.warning, 'Sync', 'Sync: 合并失败, 已用备份还原 $dirPath');
-    } catch (e, s) {
-      LogManager.addLog(LogLevel.error, 'Sync', 'Sync: 还原备份失败\n$e\n$s');
-    }
+  /// 同步阶段日志: 每条带耗时 ms
+  void _logStage(String stage, DateTime since, {String extra = ''}) {
+    final ms = DateTime.now().difference(since).inMilliseconds;
+    LogManager.addLog(LogLevel.info, 'Sync',
+        'Sync: $stage 耗时 ${ms}ms${extra.isEmpty ? '' : ' $extra'}');
   }
 
-  void _closeLocalDatabases() {
-    if (_databasesClosed) {
-      return;
-    }
-    _databasesClosed = true;
+  /// 合并直接写了本地数据库: 只作废内存缓存并刷新界面, 不关闭/不重开连接
+  void _refreshLocalCaches() {
     try {
-      HistoryManager().closeForSync();
+      HistoryManager().refreshAfterSync();
     } catch (e, s) {
       LogManager.addLog(
-          LogLevel.error, 'Sync', 'Sync: 关闭 history.db 失败\n$e\n$s');
-    }
-    try {
-      LocalFavoritesManager().closeForSync();
-    } catch (e, s) {
-      LogManager.addLog(
-          LogLevel.error, 'Sync', 'Sync: 关闭 local_favorite.db 失败\n$e\n$s');
-    }
-  }
-
-  void _reopenLocalDatabases() {
-    if (!_databasesClosed) {
-      return;
-    }
-    _databasesClosed = false;
-    try {
-      HistoryManager().reopenAfterSync();
-    } catch (e, s) {
-      LogManager.addLog(
-          LogLevel.error, 'Sync', 'Sync: 重开 history.db 失败\n$e\n$s');
+          LogLevel.error, 'Sync', 'Sync: 刷新历史缓存失败\n$e\n$s');
     }
     try {
       LocalFavoritesManager().refreshAfterSync();
     } catch (e, s) {
       LogManager.addLog(
-          LogLevel.error, 'Sync', 'Sync: 重开 local_favorite.db 失败\n$e\n$s');
+          LogLevel.error, 'Sync', 'Sync: 刷新收藏缓存失败\n$e\n$s');
     }
   }
 

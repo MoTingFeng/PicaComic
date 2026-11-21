@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:pica_comic/comic_source/comic_source.dart';
 import 'package:pica_comic/foundation/app.dart';
+import 'package:pica_comic/foundation/database_handle.dart';
 import 'package:pica_comic/foundation/log.dart';
 import 'package:pica_comic/network/webdav.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -183,7 +184,18 @@ class HistoryManager {
   factory HistoryManager() =>
       cache == null ? (cache = HistoryManager.create()) : cache!;
 
-  late Database _db;
+  /// 连接状态放在 DatabaseHandle 里: close/reopen 幂等, 关掉后再取会抛
+  /// StateError 而不是把已释放的句柄交给 sqlite3 原生层
+  late final DatabaseHandle _handle =
+      DatabaseHandle('${App.dataPath}/history.db');
+
+  /// 已打开的 history.db 连接 (image_favorites 表也在这个库里)。
+  ///
+  /// WebDAV 同步合并直接在它上面 ATTACH 远端库; 运行时不 dispose 这个连接
+  /// (ImageFavoriteManager 复用的就是它, 关掉后 UI 再查会踩已释放的原生句柄)。
+  Database get db => _handle.db;
+
+  Database get _db => _handle.db;
 
   int get length => _db.select("select count(*) from history;").first[0] as int;
 
@@ -240,7 +252,7 @@ class HistoryManager {
   }
 
   Future<void> init() async {
-    _db = sqlite3.open("${App.dataPath}/history.db");
+    _handle.open();
 
     _db.execute("""
         create table if not exists history  (
@@ -352,14 +364,25 @@ class HistoryManager {
     Webdav.uploadData();
   }
 
-  /// 同步合并会直接改 history.db, 合并前先关掉本进程的连接
+  /// 只给「数据导入/整库替换」这类需要独占数据库文件的场景, 同步路径不调用。
+  ///
+  /// 幂等: 重复调用不会二次 dispose 同一个 Database (原生 double free 的来源)。
   void closeForSync() {
-    _db.dispose();
+    _handle.close();
   }
 
-  /// 同步合并结束后重开连接并刷新缓存
+  /// 与 [closeForSync] 配对使用 (调用方要用 try/finally 保证配对);
+  /// 幂等: 没 close 过就什么也不做, 不会重复 open 出新连接。
   void reopenAfterSync() {
-    _db = sqlite3.open("${App.dataPath}/history.db");
+    if (!_handle.reopen()) {
+      return;
+    }
+    ImageFavoriteManager.init();
+    updateCache();
+  }
+
+  /// 同步合并在同一个连接上写完之后调用: 只刷新内存缓存, 不关/不重开连接
+  void refreshAfterSync() {
     ImageFavoriteManager.init();
     updateCache();
   }
