@@ -81,9 +81,25 @@ jobs:
           APP_VERSION="$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//; s/+.*//')"
           echo "versionCode = $BUILD_NUMBER (base $BASE + run $GITHUB_RUN_NUMBER)"
           echo "versionName = $APP_VERSION"
-          flutter build apk --release \
-            --build-number=$BUILD_NUMBER \
-            --dart-define=APP_VERSION=$APP_VERSION
+          # 依赖解析偶尔会被 Maven Central 429 限流打挂(与代码无关), 这里自动退避重试,
+          # 免得每次都要人工 rerun。
+          for attempt in 1 2 3 4; do
+            echo "::group::flutter build apk (第 $attempt 次)"
+            if flutter build apk --release \
+              --build-number=$BUILD_NUMBER \
+              --dart-define=APP_VERSION=$APP_VERSION; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            if [ "$attempt" = "4" ]; then
+              echo "连续 4 次构建失败, 放弃"
+              exit 1
+            fi
+            wait_time=$((attempt * 30))
+            echo "第 $attempt 次构建失败(常见原因: Maven Central 429 限流), ${wait_time}s 后重试"
+            sleep $wait_time
+          done
 
       - name: Rename APKs with version
         run: |
