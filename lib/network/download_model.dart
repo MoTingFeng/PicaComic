@@ -75,6 +75,21 @@ typedef DownloadProgressCallback = void Function();
 
 typedef DownloadProgressCallbackAsync = Future<void> Function();
 
+/// 任务自身的配置不完整, 重试也不会变好。
+///
+/// 典型场景: 恢复出来的下载任务没有任何待下载章节, 取地址时下标/上界非法
+/// (以前会直接 clamp(0, -1) 抛 "Invalid argument(s)")。
+/// [DownloadingItem.start] 捕获到它应当直接移除这一个任务,
+/// 而不是走 retry 把整个下载拖进 pause。
+class DownloadConfigError implements Exception {
+  final String message;
+
+  const DownloadConfigError(this.message);
+
+  @override
+  String toString() => "DownloadConfigError: $message";
+}
+
 abstract class DownloadingItem with _TransferSpeedMixin {
   ///完成时调用。
   ///
@@ -136,6 +151,10 @@ abstract class DownloadingItem with _TransferSpeedMixin {
   int? linkTotal;
 
   int get allowedLoadingNumber => int.tryParse(appdata.settings[79]) ?? 6;
+
+  /// 恢复出来的任务是否已经残缺到跑不完(例如没有任何待下载章节)。
+  /// 恢复队列时直接丢弃这类任务, 不让它进 start() 触发错误与全局 pause。
+  bool get isInvalid => false;
 
   DownloadingItem(this.onFinish, this.onError, this.updateInfo, this.id,
       {required this.type});
@@ -373,6 +392,14 @@ abstract class DownloadingItem with _TransferSpeedMixin {
       _stopAllTasks();
     } catch (e, s) {
       if (currentKey != _runtimeKey) return;
+      if (e is DownloadConfigError) {
+        /// 配置本身有问题的任务重试多少次都不会成功: 记一条 error,
+        /// 只把这一个任务从队列里移除, 不走 retry, 更不能让它把全局下载 pause 掉。
+        LogManager.addLog(LogLevel.error, "Download",
+            "任务配置不完整, 已移除该任务: $title($id) - ${e.message}");
+        DownloadManager().cancel(id);
+        return;
+      }
       LogManager.addLog(LogLevel.error, "Download", "$e\n$s");
       if (_isStaleLinkError(e)) {
         /// 图片地址带签名有效期时(再漫画的 images 域名就是), 隔天继续下载
@@ -527,7 +554,13 @@ abstract class DownloadingItem with _TransferSpeedMixin {
   /// 图片地址带有效期(再漫画的 images 域名)的源要覆盖它, 改成只取这一话 ——
   /// 一次性预取全书地址, 隔天继续下载时那批地址已经全部过期了。
   Future<int> ensureEpLinks(int position) async {
-    return links!.keys.elementAt(position);
+    var keys = links?.keys;
+    // 正常路径下 position < totalEps 一定合法, 这里只防越界后 elementAt 抛 RangeError
+    if (keys == null || position < 0 || position >= keys.length) {
+      throw DownloadConfigError(
+          "取第 $position 话的图片地址时越界(共 ${keys?.length ?? 0} 话)");
+    }
+    return keys.elementAt(position);
   }
 
   /// whether this platform have episode

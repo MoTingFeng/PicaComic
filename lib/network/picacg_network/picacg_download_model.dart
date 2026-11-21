@@ -102,33 +102,60 @@ class PicDownloadingItem extends DownloadingItem {
   @override
   int get totalEps => _downloadEps.isEmpty ? 1 : _downloadEps.length;
 
+  /// 恢复出来的任务章节列表可能是空的(旧数据 / 保存时章节已失效):
+  /// 这种任务一启动就必然失败, 见 [DownloadConfigError]。
+  @override
+  bool get isInvalid => _downloadEps.isEmpty;
+
+  /// 任务没有待下载章节时抛 [DownloadConfigError]。
+  ///
+  /// 以前直接 clamp(0, _downloadEps.length - 1), 空列表时上界是 -1,
+  /// int.clamp 会抛 "Invalid argument(s): 0" —— 任务再走 retry 一路到
+  /// onError, 把全局下载 pause 掉。这里换成专用异常交给上层单任务隔离。
+  void _ensureDownloadEps() {
+    if (_downloadEps.isEmpty) {
+      throw const DownloadConfigError("没有待下载的章节(任务配置不完整)");
+    }
+  }
+
+  /// [position] 必须是 _downloadEps 的合法下标, 越界同样按配置错误处理。
+  int _epAt(int position) {
+    _ensureDownloadEps();
+    if (position < 0 || position >= _downloadEps.length) {
+      throw DownloadConfigError(
+          "章节下标 $position 越界(共 ${_downloadEps.length} 话)");
+    }
+    return _downloadEps[position];
+  }
+
   @override
   Future<Map<int, List<String>>> getLinks() async {
     _eps = (await network.getEps(id)).data;
     linkTotal = _downloadEps.length;
+    _ensureDownloadEps();
     var res = <int, List<String>>{};
-    if (_downloadEps.isEmpty) {
+    // 恢复出来的任务可能已经下到末尾(或下标越界): 没有要继续下的话,
+    // 交给上层收尾, 不能拿越界下标去取地址。
+    if (downloadingEp >= _downloadEps.length) {
       return res;
     }
     // 只取当前要下的这一话, 其余等 ensureEpLinks 按需取:
     // 哔咔一本一百话, 全部预先取完就是一百次串行请求, 期间一张图都下不了。
-    var position = downloadingEp.clamp(0, _downloadEps.length - 1);
-    var ep = _downloadEps[position] + 1;
+    var ep = _epAt(downloadingEp) + 1;
     res[ep] = (await network.getComicContent(id, ep)).data;
-    linkDone = position + 1;
+    linkDone = downloadingEp + 1;
     _prefetch(ep);
     return res;
   }
 
   @override
   Future<int> ensureEpLinks(int position) async {
-    var pos = position.clamp(0, _downloadEps.length - 1);
-    var ep = _downloadEps[pos] + 1;
+    var ep = _epAt(position) + 1;
     links ??= <int, List<String>>{};
     if (links![ep] == null) {
       links![ep] = (await network.getComicContent(id, ep)).data;
     }
-    linkDone = pos + 1;
+    linkDone = position + 1;
     updateInfo?.call();
     _prefetch(ep);
     return ep;
@@ -137,6 +164,7 @@ class PicDownloadingItem extends DownloadingItem {
   /// 预取后面两话的图片地址, 让"取链接"和"下图片"重叠起来;
   /// 预取失败不影响下载, 真下到那一话时会重新取。
   void _prefetch(int currentEp) {
+    // 空任务不会有要预取的话; 也避免下面 indexOf/length 运算取到非法下标
     if (_downloadEps.isEmpty) {
       return;
     }

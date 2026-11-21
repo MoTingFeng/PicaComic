@@ -2,6 +2,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:pica_comic/tools/translations.dart';
 import 'package:pica_comic/pages/downloading_page.dart';
 import '../foundation/app.dart';
+import '../foundation/log.dart';
 
 class Notifications {
   FlutterLocalNotificationsPlugin? flutterLocalNotificationsPlugin;
@@ -62,33 +63,53 @@ class Notifications {
     }
   }
 
+  /// 通知插件的失败不能逃逸成未捕获异常。
+  ///
+  /// 平板上 flutter_local_notifications 反序列化旧的通知缓存时会抛
+  /// PlatformException(error, Missing type parameter.), 调用点在下载结束
+  /// 的收尾路径上 —— 下载本身已经完成, 通知失败不该再崩一次。
+  /// 同一个动作在窗口期内只记一条 warning, 免得每次进度刷新都刷日志。
+  void _logNotificationFailure(String action, Object e) {
+    LogManager.addLogThrottled("notification_fail_$action", LogLevel.warning,
+        "Notification", "$action失败(已忽略): $e",
+        window: const Duration(minutes: 10));
+  }
+
   void sendProgressNotification(
       int progress, int total, String title, String content) async {
     if (!(App.isAndroid || App.isIOS)) return;
-    AndroidNotificationDetails androidNotificationDetails =
-        AndroidNotificationDetails('download', '下载漫画'.tl,
-            channelDescription: '显示下载进度'.tl,
-            importance: Importance.low,
-            priority: Priority.low,
-            showProgress: true,
-            maxProgress: total,
-            progress: progress,
-            ongoing: true,
-            onlyAlertOnce: true,
-            autoCancel: false);
-    DarwinNotificationDetails ios = const DarwinNotificationDetails(
-        presentSound: false, presentAlert: false, presentBadge: false,
-        presentBanner: false);
-    NotificationDetails notificationDetails =
-        NotificationDetails(android: androidNotificationDetails, iOS: ios);
-    await flutterLocalNotificationsPlugin!.show(
-        progressId, title, content, notificationDetails,
-        payload: 'item x');
+    try {
+      AndroidNotificationDetails androidNotificationDetails =
+          AndroidNotificationDetails('download', '下载漫画'.tl,
+              channelDescription: '显示下载进度'.tl,
+              importance: Importance.low,
+              priority: Priority.low,
+              showProgress: true,
+              maxProgress: total,
+              progress: progress,
+              ongoing: true,
+              onlyAlertOnce: true,
+              autoCancel: false);
+      DarwinNotificationDetails ios = const DarwinNotificationDetails(
+          presentSound: false, presentAlert: false, presentBadge: false,
+          presentBanner: false);
+      NotificationDetails notificationDetails =
+          NotificationDetails(android: androidNotificationDetails, iOS: ios);
+      await flutterLocalNotificationsPlugin?.show(
+          progressId, title, content, notificationDetails,
+          payload: 'item x');
+    } catch (e) {
+      _logNotificationFailure("更新下载进度通知", e);
+    }
   }
 
   void endProgress() async {
     if (!(App.isAndroid || App.isIOS)) return;
-    await flutterLocalNotificationsPlugin!.cancel(progressId);
+    try {
+      await flutterLocalNotificationsPlugin?.cancel(progressId);
+    } catch (e) {
+      _logNotificationFailure("结束下载进度通知", e);
+    }
   }
 
   void cancelAll() async {

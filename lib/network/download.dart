@@ -214,7 +214,25 @@ class DownloadManager with _DownloadDb implements Listenable {
     _runInit = true;
     await _getPath();
     await _getInfo();
+    await _dropInvalidTasks();
     await _initDb();
+    // 内存采样常驻: 从 App 启动就开始记, 不再等有任务才开
+    _startMemorySampling();
+  }
+
+  /// 恢复出来的任务里, 有些配置已经残缺到永远跑不完(例如哔咔任务没有任何
+  /// 待下载章节): 它们一进 start() 就会报错, 再走 retry 一路到 onError,
+  /// 最终把整个下载 _onError -> pause() 掉, 表现就是两个 0/0 僵尸任务
+  /// 让所有下载都停了。这里在恢复队列后直接丢掉, 并立刻落盘, 下次启动不再恢复。
+  Future<void> _dropInvalidTasks() async {
+    var invalid = downloading.where((e) => e.isInvalid).toList();
+    if (invalid.isEmpty) return;
+    for (var item in invalid) {
+      downloading.remove(item);
+      LogManager.addLog(LogLevel.warning, "Download",
+          "丢弃无法恢复的下载任务 ${item.id}(${item.title}): 任务配置不完整(没有待下载章节)");
+    }
+    await _saveInfo();
   }
 
   /// 正在进行的落盘, 非 null 表示已有一轮写在跑
@@ -266,35 +284,141 @@ class DownloadManager with _DownloadDb implements Listenable {
   /// 同一个源同时只跑一个任务(避免同源并发被风控), 不同源之间并行。
   final Map<String, String> _activeTasks = {};
 
-  /// 下载期间的内存采样: 每 5 秒把 RSS 写进日志。
-  /// 长时间下载若因 OOM 被杀, 日志里能看到内存是不是一路涨上去的。
+  /// 常驻内存采样: App 启动后一直跑, 任务结束/异常都不停。
+  /// 任务活跃(有源在飞)时 5 秒一条, 空闲时 30 秒一条。
+  ///
+  /// 之前只在下载期间采样, 任务一结束就停 —— 真机 OOM 崩溃前 12 分钟
+  /// 一条样本都没有, 完全看不出内存在涨。
   Timer? _memoryTimer;
 
+  /// 上一次采样的时间, 用于按活跃/空闲决定间隔
+  DateTime? _lastSampleAt;
+
   void _startMemorySampling() {
-    _memoryTimer ??= Timer.periodic(const Duration(seconds: 5), (_) {
-      var rss = 0;
-      var maxRss = 0;
-      try {
-        rss = ProcessInfo.currentRss;
-        maxRss = ProcessInfo.maxRss;
-      } catch (_) {
-        // 拿不到就记 0, 不影响下载
-      }
-      var images = 0;
-      for (var task in downloading) {
-        images += task.activeImages;
-      }
-      LogManager.addLog(
-          LogLevel.info,
-          "Memory",
-          "rss=${rss ~/ (1024 * 1024)}MB maxRss=${maxRss ~/ (1024 * 1024)}MB "
-              "tasks=${downloading.length} sources=${_activeTasks.length} images=$images");
+    _memoryTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      _maybeSampleMemory();
     });
   }
 
+  /// 只允许由 dispose() 调用: 任务结束、暂停都不再停止采样
   void _stopMemorySampling() {
     _memoryTimer?.cancel();
     _memoryTimer = null;
+    _lastSampleAt = null;
+  }
+
+  /// 有任务在飞才算活跃(空闲 30s, 活跃 5s)
+  bool get _hasActiveTask => _activeTasks.isNotEmpty;
+
+  void _maybeSampleMemory() {
+    var now = DateTime.now();
+    var interval = _hasActiveTask
+        ? const Duration(seconds: 5)
+        : const Duration(seconds: 30);
+    var last = _lastSampleAt;
+    if (last != null && now.difference(last) < interval) return;
+    _lastSampleAt = now;
+    _sampleMemory();
+  }
+
+  /// 每个指标单独容错: 取不到记 -1/0, 不影响其它字段, 也不影响下载
+  int _safeInt(int Function() f) {
+    try {
+      return f();
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  double _safeDouble(double Function() f) {
+    try {
+      return f();
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  String _mbText(int bytes) =>
+      bytes < 0 ? "-1" : "${bytes ~/ (1024 * 1024)}";
+
+  /// 下载目录里的文件数(递归)。递归枚举设了上限, 免得目录很大时
+  /// 每 5 秒全量扫一遍卡住主线程; 触到上限记成 "20000+"。
+  static const _dirFileCountLimit = 20000;
+
+  String _downloadDirFileCount() {
+    try {
+      var dirPath = path;
+      if (dirPath == null) return "-1";
+      var dir = Directory(dirPath);
+      if (!dir.existsSync()) return "-1";
+      var count = 0;
+      for (var entry in dir.listSync()) {
+        if (entry is File) {
+          count++;
+        } else if (entry is Directory) {
+          count += entry.listSync(recursive: true).length;
+        }
+        if (count >= _dirFileCountLimit) {
+          return "$_dirFileCountLimit+";
+        }
+      }
+      return "$count";
+    } catch (_) {
+      return "-1";
+    }
+  }
+
+  /// 打开的文件描述符数: fd 泄漏也是内存/句柄涨的一个来源。
+  /// 非 Linux(拿不到 /proc)时记 -1。
+  int _openFileDescriptorCount() {
+    try {
+      return Directory("/proc/self/fd").listSync().length;
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  void _sampleMemory() {
+    try {
+      var rss = _safeInt(() => ProcessInfo.currentRss);
+      var maxRss = _safeInt(() => ProcessInfo.maxRss);
+      var tasks = 0;
+      var images = 0;
+      try {
+        tasks = downloading.length;
+        for (var task in downloading) {
+          images += task.activeImages;
+        }
+      } catch (_) {
+        // 任务队列读不到不影响内存数字
+      }
+      var logs = _safeInt(() => LogManager.logs.length);
+      var logFileMb = _safeDouble(() {
+        var file = LogManager.logFile;
+        if (file == null) return -1;
+        return file.lengthSync() / (1024 * 1024);
+      });
+      var jsonKb = _safeDouble(() {
+        var p = path;
+        if (p == null) return -1;
+        var file = File("$p${pathSep}newDownload.json");
+        if (!file.existsSync()) return -1;
+        return file.lengthSync() / 1024;
+      });
+      var dirFiles = _downloadDirFileCount();
+      var fds = _openFileDescriptorCount();
+      LogManager.addLog(
+          LogLevel.info,
+          "Memory",
+          "rss=${_mbText(rss)}MB maxRss=${_mbText(maxRss)}MB "
+              "tasks=$tasks sources=${_activeTasks.length} images=$images "
+              "logs=$logs logMB=${logFileMb.toStringAsFixed(1)} "
+              "jsonKB=${jsonKb.toStringAsFixed(1)} dirFiles=$dirFiles fd=$fds");
+    } catch (e) {
+      // 采样本身失败绝不能影响下载
+      LogManager.addLogThrottled("memory_sample_failed", LogLevel.warning,
+          "Memory", "内存采样失败: $e");
+    }
   }
 
   /// 全局同时在飞的图片数上限(设置 92)。0 或无法解析表示不限制。
@@ -407,9 +531,8 @@ class DownloadManager with _DownloadDb implements Listenable {
     //清除已完成的任务, 给空闲的源安排下一个任务
     _startIdleTasks();
     if (_activeTasks.isEmpty) {
-      //标记状态为未在下载
+      //标记状态为未在下载(内存采样不再停: 常驻才能抓到崩溃前的曲线)
       isDownloading = false;
-      _stopMemorySampling();
       notifications.endProgress();
     }
   }
@@ -440,7 +563,7 @@ class DownloadManager with _DownloadDb implements Listenable {
   ///暂停下载(所有源的活动任务)
   void pause() {
     isDownloading = false;
-    _stopMemorySampling();
+    //内存采样常驻, 暂停不再停采样(只是间隔回到空闲的 30s)
     for (var id in _activeTasks.values.toList()) {
       _findTask(id)?.pause();
     }
