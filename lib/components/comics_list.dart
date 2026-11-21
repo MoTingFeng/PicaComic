@@ -29,9 +29,13 @@ class ComicsPageLogic<T> extends StateController {
   /// 多选模式下已选中的漫画 id
   final Set<String> selectedIds = {};
 
-  void enterSelectionMode() {
+  /// 进入多选模式; 传入 id 时把当前长按的那一项直接选中
+  void enterSelectionMode([String? id]) {
     selecting = true;
     selectedIds.clear();
+    if (id != null) {
+      selectedIds.add(id);
+    }
     update();
   }
 
@@ -784,12 +788,15 @@ abstract class ComicsPage<T extends BaseComic> extends StatelessWidget {
   /// 多选模式下在列表上方插入操作栏
   Widget buildSelectableBody(BuildContext context, ComicsPageLogic logic,
       List<T> comics, Widget child) {
-    if (!logic.selecting) {
-      return child;
-    }
+    // 注意: 这里必须保持树结构稳定 —— 不能"不选中时直接返回 child、选中时再包一层 Column",
+    // 否则切换多选时滚动视图会被挂到新位置, ScrollPosition 重建, 列表直接跳回顶部。
+    // 统一用 Column + 固定占位, 只替换顶部那一格。
     return Column(
       children: [
-        buildSelectionBar(context, logic, comics),
+        if (logic.selecting)
+          buildSelectionBar(context, logic, comics)
+        else
+          const SizedBox.shrink(),
         Expanded(child: child),
       ],
     );

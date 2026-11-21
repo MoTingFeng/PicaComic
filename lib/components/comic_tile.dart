@@ -128,7 +128,8 @@ abstract class ComicTile extends StatelessWidget {
                           if (logic == null) {
                             showToast(message: "当前页面不支持多选".tl);
                           } else {
-                            logic.enterSelectionMode();
+                            // 长按的那一项直接选中, 不用用户再点一次
+                            logic.enterSelectionMode(comicID);
                           }
                         },
                       ),
