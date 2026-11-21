@@ -201,10 +201,12 @@ class _CategoryComicsPageState extends State<CategoryComicsPage> {
       },
       defaultGroups: groupValues,
     );
-    optionsValue = restored.options;
+    // CategoryOptions 里的集合是只读的, 复制成可变集合再交给页面:
+    // optionsValue 会被点排序原地改, groupValues 会被点分组 chip 原地改
+    optionsValue = List<String>.from(restored.options);
     groupValues
       ..clear()
-      ..addAll(restored.groups);
+      ..addAll(Map<String, String?>.from(restored.groups));
   }
 
   /// 写盘走 500ms 防抖, 连续点标签不会反复写文件

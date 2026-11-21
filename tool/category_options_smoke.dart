@@ -30,6 +30,7 @@ void main() {
     _debounceBeforeWrite(dir);
     _resolveFallback();
     _resolveWithoutSaved();
+    _restoreIsMutable(dir);
     _corruptedFile(dir);
     _defensiveCopy(dir);
   } finally {
@@ -145,6 +146,55 @@ void _resolveWithoutSaved() {
   );
   check("排序用默认", resolved.options.single == "dd");
   check("分组用默认", resolved.groups["题材"] == "0");
+}
+
+/// 恢复出来的集合是只读的(CategoryOptions 的不可变约定), 页面必须复制成可变集合
+/// 再改: 不复制的话点排序会抛 Unsupported operation: Cannot modify an unmodifiable list
+void _restoreIsMutable(Directory dir) {
+  print("\n[恢复结果只读: 复制成可变集合后才能改]");
+  var mutableDir = Directory("${dir.path}/mutable")..createSync(recursive: true);
+  CategoryOptionsStore(mutableDir.path)
+    ..save(_key, _sample())
+    ..flush();
+  // 新实例 = 冷启动后从磁盘读回上次的选择
+  var saved = CategoryOptionsStore(mutableDir.path)[_key];
+  var resolved = resolveCategoryOptions(
+    saved: saved,
+    availableOptions: const [
+      ["dd", "da", "ld", "vd"],
+    ],
+    defaultOptions: const ["dd"],
+    availableGroups: const {
+      "题材": ["0", "4"],
+      "读者群": ["3262"],
+    },
+    defaultGroups: const {"题材": "0", "读者群": "3262"},
+  );
+  check("从磁盘恢复出上次排序", resolved.options.single == "ld");
+  check("从磁盘恢复出上次分组", resolved.groups["题材"] == "4");
+
+  var editOptions = List<String>.from(resolved.options);
+  editOptions[0] = "vd";
+  check("复制的 options 可以赋值", editOptions.single == "vd");
+  check("改副本不影响原实例 options", resolved.options.single == "ld");
+  var editGroups = Map<String, String?>.from(resolved.groups);
+  editGroups["题材"] = "0";
+  check("复制的 groups 可以赋值", editGroups["题材"] == "0");
+  check("改副本不影响原实例 groups", resolved.groups["题材"] == "4");
+  check("原实例 options 仍不可变",
+      _rejectsModify(() => resolved.options[0] = "da"));
+  check("原实例 groups 仍不可变",
+      _rejectsModify(() => resolved.groups["题材"] = "0"));
+}
+
+/// 改只读集合应抛 UnsupportedError
+bool _rejectsModify(void Function() action) {
+  try {
+    action();
+  } on UnsupportedError {
+    return true;
+  }
+  return false;
 }
 
 void _corruptedFile(Directory dir) {
