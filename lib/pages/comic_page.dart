@@ -600,23 +600,49 @@ class ComicPageLogic<T extends Object> extends StateController {
   int colorIndex = 0;
   bool? favoriteOnPlatform;
 
+  Future<void>? _loadingFuture;
+
   void get(Future<Res<T>> Function() loadData,
-      Future<bool> Function(T) loadFavorite, String Function() getId) async {
-    var [res, _] = await Future.wait(
-        [loadData(), Future.delayed(const Duration(milliseconds: 300))]);
-    if (res.error) {
-      message = res.errorMessage;
-      if (message == "Exit") {
-        loading = false;
-        return;
-      }
-    } else {
-      data = res.data;
-      favorite = await loadFavorite(res.data);
+      Future<bool> Function(T) loadFavorite, String Function() getId) {
+    // 加载期间页面每次重建都会再调一次 get, 源站不稳时会形成重试风暴;
+    // 这里同一时刻只允许一次在飞。
+    if (_loadingFuture != null) {
+      return;
     }
-    loading = false;
-    history = await HistoryManager().find(getId());
-    update();
+    _loadingFuture = _load(loadData, loadFavorite, getId);
+  }
+
+  Future<void> _load(Future<Res<T>> Function() loadData,
+      Future<bool> Function(T) loadFavorite, String Function() getId) async {
+    try {
+      var [res, _] = await Future.wait(
+          [loadData(), Future.delayed(const Duration(milliseconds: 300))]);
+      if (res.error) {
+        message = res.errorMessage;
+        if (message == "Exit") {
+          loading = false;
+          return;
+        }
+      } else {
+        data = res.data;
+        try {
+          favorite = await loadFavorite(res.data);
+        } catch (e) {
+          // 页面已关闭时读收藏状态会访问不到页面逻辑, 不冒泡成未捕获异常
+          LogManager.addLog(
+              LogLevel.warning, "ComicPage", "读取收藏状态失败: $e");
+        }
+      }
+      loading = false;
+      try {
+        history = await HistoryManager().find(getId());
+      } catch (e) {
+        LogManager.addLog(LogLevel.warning, "ComicPage", "读取历史记录失败: $e");
+      }
+      update();
+    } finally {
+      _loadingFuture = null;
+    }
   }
 
   void refresh_() {
