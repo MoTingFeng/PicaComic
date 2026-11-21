@@ -491,9 +491,10 @@ class _SettingsPageState extends State<SettingsPage> implements PopEntry{
         ListTile(
           leading: const Icon(Icons.alternate_email),
           title: Text("日志上报邮箱".tl),
-          subtitle: Text(appdata.settings[91].isEmpty
-              ? "日志页「发送到邮箱」的收件人, 留空则无法发送".tl
-              : appdata.settings[91]),
+          // 发送要经过手机上的第三方邮件 App, 它发完不会自己回到 PicaComic,
+          // 这里先写明, 免得用户以为卡住了。
+          subtitle: Text("${appdata.settings[91].isEmpty ? "日志页「发送到邮箱」的收件人, 留空则无法发送".tl : appdata.settings[91]}\n"
+              "${"发送会打开手机邮件 App, 发送完成需手动返回应用".tl}"),
           onTap: setLogEmail,
         ),
         ListTile(
