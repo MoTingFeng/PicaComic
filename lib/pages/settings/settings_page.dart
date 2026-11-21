@@ -35,7 +35,7 @@ import '../../network/http_proxy.dart';
 import '../../network/jm_network/jm_network.dart';
 import '../../network/nhentai_network/nhentai_main_network.dart';
 import '../../network/update.dart';
-import '../../network/webdav.dart';
+import '../../foundation/sync/sync_service.dart';
 import '../../tools/background_service.dart';
 import '../../tools/debug.dart';
 import '../welcome_page.dart';
@@ -569,6 +569,7 @@ class _SettingsPageState extends State<SettingsPage> implements PopEntry{
         ListTile(
           leading: const Icon(Icons.sync),
           title: Text("数据同步".tl),
+          subtitle: Text(SyncService.instance.statusText().split("\n").first),
           trailing: const Icon(Icons.arrow_right),
           onTap: () => syncDataSettings(context),
         ),

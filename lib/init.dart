@@ -8,6 +8,7 @@ import 'package:pica_comic/foundation/cache_manager.dart';
 import 'package:pica_comic/foundation/history.dart';
 import 'package:pica_comic/foundation/js_engine.dart';
 import 'package:pica_comic/foundation/local_favorites.dart';
+import 'package:pica_comic/foundation/sync/sync_service.dart';
 import 'package:pica_comic/foundation/log.dart';
 import 'package:pica_comic/network/cookie_jar.dart';
 import 'package:pica_comic/network/http_proxy.dart';
@@ -91,6 +92,8 @@ Future<void> init() async {
       AppTranslation.init(),
     ]);
     CacheManager().setLimitSize(appdata.appSettings.cacheLimit);
+    // WebDAV 多设备同步: 读设备 id / 上次同步状态, 冷启动同步由 MyApp 触发
+    await SyncService.instance.init();
   } catch (e, s) {
     LogManager.addLog(
         LogLevel.error, "Init", "App initialization failed!\n$e$s");

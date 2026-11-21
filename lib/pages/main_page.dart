@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:pica_comic/base.dart';
 import 'package:pica_comic/components/components.dart';
 import 'package:pica_comic/foundation/app_page_route.dart';
-import 'package:pica_comic/network/webdav.dart';
 import 'package:pica_comic/tools/app_links.dart';
 import 'package:pica_comic/tools/background_service.dart';
 import 'package:pica_comic/tools/translations.dart';
@@ -201,8 +200,8 @@ class MainPageState extends State<MainPage> {
       appdata.writeData();
     }
 
-    Future.delayed(const Duration(milliseconds: 300), () => Webdav.syncData())
-        .then((v) => checkClipboard());
+    // 冷启动同步已由 SyncService.onAppStarted() 在 MyApp.initState 里触发
+    Future.delayed(const Duration(milliseconds: 300), () => checkClipboard());
     _observer = NaviObserver();
     super.initState();
   }

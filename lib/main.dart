@@ -12,6 +12,7 @@ import 'package:pica_comic/components/window_frame.dart';
 import 'package:pica_comic/foundation/app.dart';
 import 'package:pica_comic/foundation/app_page_route.dart';
 import 'package:pica_comic/foundation/log.dart';
+import 'package:pica_comic/foundation/sync/sync_service.dart';
 import 'package:pica_comic/init.dart';
 import 'package:pica_comic/network/http_client.dart';
 import 'package:pica_comic/pages/auth_page.dart';
@@ -23,7 +24,6 @@ import 'package:pica_comic/tools/tags_translation.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'components/components.dart';
-import 'network/webdav.dart';
 
 bool notFirstUse = false;
 
@@ -81,8 +81,6 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
-  DateTime time = DateTime.fromMillisecondsSinceEpoch(0);
-
   bool forceRebuild = false;
 
   OverlayEntry? hideContentOverlay;
@@ -130,18 +128,14 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         Future.delayed(const Duration(milliseconds: 200), checkClipboard);
       }
 
-      if (DateTime.now().millisecondsSinceEpoch - time.millisecondsSinceEpoch >
-          7200000) {
-        Webdav.syncData();
-        time = DateTime.now();
-      }
+      // 回到前台: 距上次成功同步满 2 分钟才再同步(旧实现是 2 小时)
+      SyncService.instance.onAppResumed();
     });
   }
 
   @override
   void initState() {
     MyApp.updater = () => setState(() => forceRebuild = true);
-    time = DateTime.now();
     TagsTranslation.readData();
     if (App.isAndroid && appdata.settings[38] == "1") {
       try {
@@ -156,6 +150,8 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       blockScreenshot();
     }
     PaintingBinding.instance.imageCache.maximumSizeBytes = 200 * 1024 * 1024;
+    // init() 已完成, 冷启动同步一次(没有配置 WebDAV 时直接跳过)
+    SyncService.instance.onAppStarted();
     super.initState();
   }
 

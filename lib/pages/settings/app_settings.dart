@@ -592,20 +592,21 @@ void importDataSetting(BuildContext context) {
 }
 
 void syncDataSettings(BuildContext context) {
+  // 旧版同步失败后会往配置尾部追加 ";0", 这里只取前 4 段, 重新保存即可修好
+  var rawConfigs = appdata.settings[45].split(';');
   var configs = ["", "", "", ""];
-  if (appdata.settings[45] != "") {
-    configs = appdata.settings[45].split(';');
+  for (var i = 0; i < 4 && i < rawConfigs.length; i++) {
+    configs[i] = rawConfigs[i];
   }
   String url = configs[0];
   String username = configs[1];
   String pwd = configs[2];
   String path = configs[3];
-  int value = 0;
   showDialog(
     context: context,
     useSafeArea: false,
     builder: (context) => ContentDialog(
-      title: "Webdav",
+      title: "数据同步".tl,
       content: Column(
         children: [
           TextField(
@@ -649,52 +650,49 @@ void syncDataSettings(BuildContext context) {
           const SizedBox(
             height: 8,
           ),
-          StatefulBuilder(builder: (context, stateSetter) {
-            return Row(
-              children: [
-                Text("立即执行:".tl),
-                Radio<int>(
-                    value: 0,
-                    groupValue: value,
-                    onChanged: (i) => stateSetter(() => value = 0)),
-                Text("上传数据".tl),
-                Radio<int>(
-                    value: 1,
-                    groupValue: value,
-                    onChanged: (i) => stateSetter(() => value = 1)),
-                Text("下载数据".tl),
-              ],
-            );
-          }),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              SyncService.instance.statusText(),
+              style: const TextStyle(fontSize: 12),
+            ),
+          ),
           const SizedBox(
             height: 8,
           ),
-          Center(
-            child: FilledButton(
-              child: Text("提交".tl),
-              onPressed: () async {
-                if (url.isEmpty) {
+          Wrap(
+            spacing: 8,
+            alignment: WrapAlignment.center,
+            children: [
+              OutlinedButton(
+                child: Text("保存".tl),
+                onPressed: () {
                   appdata.settings[45] = "$url;$username;$pwd;$path";
                   appdata.updateSettings();
                   App.globalBack();
-                  return;
-                }
-                var dialog = showLoadingDialog(context,
-                    allowCancel: false, barrierDismissible: false);
-                var res = value == 0
-                    ? await Webdav.uploadData("$url;$username;$pwd;$path")
-                    : await Webdav.downloadData("$url;$username;$pwd;$path");
-                if (!res) {
-                  dialog.close();
-                  showToast(message: "Failed to sync data");
-                } else {
+                },
+              ),
+              FilledButton(
+                child: Text("立即同步".tl),
+                onPressed: () async {
                   appdata.settings[45] = "$url;$username;$pwd;$path";
                   appdata.updateSettings();
-                  dialog.close();
-                  App.globalBack();
-                }
-              },
-            ),
+                  if (url.isEmpty) {
+                    App.globalBack();
+                    return;
+                  }
+                  var res = await SyncService.instance.manualSync();
+                  if (res.success && !res.skipped) {
+                    App.globalBack();
+                  }
+                },
+              ),
+            ],
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(0, 10, 0, 10),
@@ -708,10 +706,7 @@ void syncDataSettings(BuildContext context) {
                 const SizedBox(
                   width: 4,
                 ),
-                if (configs.length == 4)
-                  Text("将URL留空以禁用同步".tl)
-                else
-                  Text("已禁用".tl)
+                Text("将URL留空以禁用同步".tl)
               ],
             ),
           )
