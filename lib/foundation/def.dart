@@ -24,7 +24,7 @@ const String webUA =
 //由 CI 通过 --dart-define=APP_VERSION 注入 pubspec.yaml 的版本名, 发版只改一处;
 //本地直接 flutter run 时用下面的默认值兜底(不参与发版, 过期也不影响 CI 产物)
 const appVersion =
-    String.fromEnvironment("APP_VERSION", defaultValue: "4.10.0-mod");
+    String.fromEnvironment("APP_VERSION", defaultValue: "4.10.1-mod");
 
 //定义宽屏设备的临界值
 const changePoint = 600;
