@@ -782,10 +782,10 @@ abstract class BaseComicPage<T extends Object> extends StatelessWidget {
         endDrawerEnableOpenDragGesture: false,
         endDrawer: SearchOtherSourcesPanel(
           sourceKey: sourceKey,
-          comicId: id,
-          title: title ?? "",
-          subTitle: subTitle,
-          tags: tags,
+          // 惰性读取: 这些值依赖页面逻辑, 不能在 endDrawer 参数求值时取值
+          titleLoader: () => title ?? "",
+          subTitleLoader: () => subTitle,
+          tagsLoader: () => tags,
         ),
         body: StateBuilder<ComicPageLogic<T>>(
           tag: tag,

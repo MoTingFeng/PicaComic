@@ -56,17 +56,19 @@ class SearchOtherSourcesPanel extends StatefulWidget {
   const SearchOtherSourcesPanel({
     super.key,
     required this.sourceKey,
-    required this.comicId,
-    required this.title,
-    this.subTitle,
-    this.tags,
+    required this.titleLoader,
+    this.subTitleLoader,
+    this.tagsLoader,
   });
 
   final String sourceKey;
-  final String comicId;
-  final String title;
-  final String? subTitle;
-  final Map<String, List<String>>? tags;
+
+  /// 这些值来自 BaseComicPage 的 getter, 依赖页面逻辑(StateController)。
+  /// Scaffold 的 endDrawer 参数是在 StateBuilder 之外求值的, 这里必须惰性读取,
+  /// 否则页面逻辑还没注册就会抛 "ComicPageLogic ... Not Found"。
+  final String Function() titleLoader;
+  final String? Function()? subTitleLoader;
+  final Map<String, List<String>>? Function()? tagsLoader;
 
   @override
   State<SearchOtherSourcesPanel> createState() =>
@@ -75,6 +77,9 @@ class SearchOtherSourcesPanel extends StatefulWidget {
 
 class _SearchOtherSourcesPanelState extends State<SearchOtherSourcesPanel> {
   late List<_Query> _queries;
+  late String _title;
+  String? _subTitle;
+  Map<String, List<String>>? _tags;
   late String? _authorRaw;
   final _manualController = TextEditingController();
   String? _manualQuery;
@@ -89,6 +94,9 @@ class _SearchOtherSourcesPanelState extends State<SearchOtherSourcesPanel> {
   @override
   void initState() {
     super.initState();
+    _title = widget.titleLoader();
+    _subTitle = widget.subTitleLoader?.call();
+    _tags = widget.tagsLoader?.call();
     _authorRaw = _resolveAuthor();
     _buildQueries();
     WidgetsBinding.instance.addPostFrameCallback((_) => _run());
@@ -102,11 +110,11 @@ class _SearchOtherSourcesPanelState extends State<SearchOtherSourcesPanel> {
 
   /// 作者在各地的存放位置不同: 先看副标题, 再在标签里按常见键名找
   String? _resolveAuthor() {
-    var sub = widget.subTitle?.trim();
+    var sub = _subTitle?.trim();
     if (sub != null && sub.isNotEmpty && !sub.contains("http")) {
       return sub;
     }
-    var tags = widget.tags;
+    var tags = _tags;
     if (tags == null) {
       return null;
     }
@@ -138,8 +146,8 @@ class _SearchOtherSourcesPanelState extends State<SearchOtherSourcesPanel> {
   }
 
   void _buildQueries() {
-    var title = normalizeTitle(widget.title);
-    var fragment = fragmentTitle(widget.title);
+    var title = normalizeTitle(_title);
+    var fragment = fragmentTitle(_title);
     var authors = splitAuthors(_authorRaw);
     _queries = [
       if (title.isNotEmpty) _Query("标题".tl, title),
@@ -147,7 +155,7 @@ class _SearchOtherSourcesPanelState extends State<SearchOtherSourcesPanel> {
       for (var author in authors.take(2)) _Query("作者".tl, author),
     ];
     if (_queries.isEmpty) {
-      _queries = [_Query("标题".tl, widget.title.trim())];
+      _queries = [_Query("标题".tl, _title.trim())];
     }
   }
 
@@ -264,7 +272,7 @@ class _SearchOtherSourcesPanelState extends State<SearchOtherSourcesPanel> {
   }
 
   _Hit _score(BaseComic comic, ComicSource source) {
-    var score = titleSimilarity(widget.title, comic.title);
+    var score = titleSimilarity(_title, comic.title);
     var authorHit = false;
     var authors = splitAuthors(_authorRaw);
     if (authors.isNotEmpty) {
@@ -319,7 +327,7 @@ class _SearchOtherSourcesPanelState extends State<SearchOtherSourcesPanel> {
                     style: Theme.of(context).textTheme.titleMedium),
                 const SizedBox(height: 2),
                 Text(
-                  widget.title,
+                  _title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall,
