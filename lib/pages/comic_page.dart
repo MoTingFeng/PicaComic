@@ -7,6 +7,7 @@ import 'package:pica_comic/base.dart';
 import 'package:pica_comic/comic_source/comic_source.dart';
 import 'package:pica_comic/components/comment.dart';
 import 'package:pica_comic/components/components.dart';
+import 'package:pica_comic/components/search_other_sources.dart';
 import 'package:pica_comic/components/select_download_eps.dart';
 import 'package:pica_comic/foundation/app.dart';
 import 'package:pica_comic/foundation/history.dart';
@@ -777,6 +778,15 @@ abstract class BaseComicPage<T extends Object> extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(builder: (context, constraints) {
       return Scaffold(
+        // 「在其他源搜索」侧页: 用本作的名字/节选/作者去别的源搜一遍
+        endDrawerEnableOpenDragGesture: false,
+        endDrawer: SearchOtherSourcesPanel(
+          sourceKey: sourceKey,
+          comicId: id,
+          title: title ?? "",
+          subTitle: subTitle,
+          tags: tags,
+        ),
         body: StateBuilder<ComicPageLogic<T>>(
           tag: tag,
           init: ComicPageLogic<T>(),
@@ -892,6 +902,13 @@ abstract class BaseComicPage<T extends Object> extends StatelessWidget {
         child: Text(title!),
       ),
       actions: [
+        Builder(
+          builder: (ctx) => IconButton(
+            tooltip: "在其他源搜索".tl,
+            icon: const Icon(Icons.travel_explore),
+            onPressed: () => Scaffold.of(ctx).openEndDrawer(),
+          ),
+        ),
         IconButton(
             onPressed: showMoreActions, icon: const Icon(Icons.more_horiz))
       ],
