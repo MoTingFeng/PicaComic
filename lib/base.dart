@@ -175,15 +175,14 @@ class Appdata {
 
   Future<void> readSettings(SharedPreferences s) async {
     var settingsFile = File("${App.dataPath}/settings");
-    List<String> st;
+    List<String> st = [];
     if (settingsFile.existsSync()) {
-      var json = jsonDecode(await settingsFile.readAsString());
-      if (json is List) {
-        st = List.from(json);
-      } else {
-        st = [];
-      }
-    } else {
+      st = await _readSettingsFile(settingsFile);
+    }
+    if (st.isEmpty) {
+      // 文件不存在或已损坏: 退回 SharedPreferences 里的副本。
+      // 以前文件存在但内容坏掉时会直接抛错, 结果是设置全回默认
+      // (WebDAV 配置、日志上报邮箱都在里面, 属于不可恢复的丢失)。
       st = s.getStringList("settings") ?? [];
     }
     for (int i = 0; i < st.length && i < settings.length; i++) {
@@ -196,10 +195,33 @@ class Appdata {
 
   Future<void> updateSettings([bool syncData = true]) async {
     var settingsFile = File("${App.dataPath}/settings");
-    await settingsFile.writeAsString(jsonEncode(settings));
+    // 先写 .tmp 再 rename: writeAsString 是「清空再写」, 中途崩溃/被系统杀掉
+    // 会把设置文件写成半截 JSON, 下次启动就只能当默认值处理。
+    var tmp = File("${settingsFile.path}.tmp");
+    await tmp.writeAsString(jsonEncode(settings), flush: true);
+    await tmp.rename(settingsFile.path);
     if (syncData) {
       Webdav.uploadData();
     }
+  }
+
+  /// 读设置文件; 坏掉时再试一次上次原子写留下的 .tmp, 都不行就返回空列表
+  Future<List<String>> _readSettingsFile(File settingsFile) async {
+    for (final file in [settingsFile, File("${settingsFile.path}.tmp")]) {
+      if (!file.existsSync()) {
+        continue;
+      }
+      try {
+        var json = jsonDecode(await file.readAsString());
+        if (json is List) {
+          return List.from(json);
+        }
+      } catch (e) {
+        LogManager.addLog(LogLevel.error, "Appdata",
+            "设置文件 ${file.path} 读取失败(尝试下一个来源): $e");
+      }
+    }
+    return [];
   }
 
   void writeFirstUse() async {
@@ -227,19 +249,53 @@ class Appdata {
     var s = await SharedPreferences.getInstance();
     try {
       await readSettings(s);
-      searchHistory = s.getStringList("search") ?? [];
-      favoriteTags = (s.getStringList("favoriteTags") ?? []).toSet();
-      blockingKeyword = s.getStringList("blockingKeyword") ?? [];
-      if (s.getStringList("firstUse") != null) {
-        var st = s.getStringList("firstUse")!;
-        for (int i = 0; i < st.length; i++) {
-          firstUse[i] = st[i];
-        }
-      }
+      // firstUse 先读: 它决定要不要显示首次启动页, 后面的搜索历史/标签读失败
+      // 不能把它一起带走
+      _readFirstUse(s);
+      searchHistory = _readStringList(s, "search") ?? [];
+      favoriteTags = (_readStringList(s, "favoriteTags") ?? []).toSet();
+      blockingKeyword = _readStringList(s, "blockingKeyword") ?? [];
       readImplicitData();
       return firstUse[3] == "1";
+    } catch (e, st) {
+      // 不再静默: 以前这里 `catch (e) { return false; }` 什么都不记,
+      // 「设置读到了、只有首启标志没读到」这种情况完全无迹可查, 表现就是
+      // 用户莫名其妙被退回首次启动页。
+      LogManager.addLog(
+          LogLevel.error, "Appdata", "读取本地数据失败(部分保持默认): $e\n$st");
+      return firstUse[3] == "1";
+    }
+  }
+
+  /// 读一个可能存在、也可能类型不对的字符串列表; 单个键坏掉只按空处理
+  List<String>? _readStringList(SharedPreferences s, String key) {
+    try {
+      return s.getStringList(key);
     } catch (e) {
-      return false;
+      LogManager.addLog(
+          LogLevel.error, "Appdata", "读取 SharedPreferences $key 失败(按空处理): $e");
+      return null;
+    }
+  }
+
+  /// 「是否进过 App」的标志单独读 (firstUse[3])。
+  ///
+  /// 它只在 SharedPreferences 里, 设置本体在独立文件里; 这份 prefs 一旦丢失/读不出,
+  /// 老用户就会被退回首次启动页重新点一遍。所以:
+  /// - 复制时夹住长度 (原来是 `for (i < st.length) firstUse[i] = st[i]`, 长了会越界)
+  /// - 完全没有记录但设置文件存在 => 按老用户处理, 不显示首启页
+  void _readFirstUse(SharedPreferences s) {
+    var st = _readStringList(s, "firstUse");
+    if (st == null) {
+      if (File("${App.dataPath}/settings").existsSync()) {
+        firstUse[3] = "1";
+        LogManager.addLog(LogLevel.warning, "Appdata",
+            "SharedPreferences 里没有 firstUse 记录, 但设置文件存在 -> 按老用户处理, 不显示首启页");
+      }
+      return;
+    }
+    for (var i = 0; i < st.length && i < firstUse.length; i++) {
+      firstUse[i] = st[i];
     }
   }
 

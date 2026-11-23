@@ -116,6 +116,11 @@ class SyncService {
   /// 上次启动写了 'starting' 却没走到首屏(异常退出): 本次不自动同步
   bool _previousLaunchUnclean = false;
 
+  /// 冷启动后的这一小段时间内忽略 resumed (冷启动补发的 resumed 不是「回到前台」)
+  DateTime _ignoreResumeUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool _loggedColdResumeSkip = false;
+
   bool _syncing = false;
 
   bool _pendingUpload = false;
@@ -155,6 +160,9 @@ class SyncService {
       _previousLaunchUnclean = _state.launchGuard == syncLaunchGuardStarting;
       _state.launchGuard = syncLaunchGuardStarting;
       await _saveState();
+      _ignoreResumeUntil = DateTime.now().add(syncColdStartResumeIgnore);
+      // 上次同步如果死在合并阶段, 这里的标记是比日志更可靠的证据(日志会丢行)
+      _reportPreviousMergeStage();
       ReadPositionStore.instance.onChanged = markDirty;
       LogManager.addLog(LogLevel.info, 'Sync',
           'Sync: init deviceId=${_state.deviceId} lastSync=${_state.lastSyncAt} previousLaunchUnclean=$_previousLaunchUnclean');
@@ -203,18 +211,31 @@ class SyncService {
             LogLevel.info,
             'Sync',
             'Sync: 首屏稳定 ${syncStartupDelay.inSeconds}s, 开始自动同步');
-        unawaited(_runStartupSync());
+        unawaited(_runGuardedSync('首屏稳定 ${syncStartupDelay.inSeconds}s'));
       });
     });
   }
 
-  /// 自动同步期间也挂上启动标记: 如果同步把进程搞崩, 下次启动会看到
-  /// starting 而跳过自动同步, 保证 App 至少能正常进首屏一次。
-  Future<void> _runStartupSync() async {
+  /// 自动同步(冷启动 / 回到前台)统一走这里: 同步期间把启动标记改成 starting,
+  /// 如果同步把进程搞崩, 下次启动会看到 starting 而跳过自动同步, 保证 App 至少能正常进首屏一次。
+  ///
+  /// 以前只有冷启动那条路挂标记, 回到前台触发的同步崩了安全阀不会生效
+  /// (4.10.2 那次崩在回前台同步上, 重启后日志还是 previousLaunchUnclean=false)。
+  Future<void> _runGuardedSync(String reason) async {
+    if (_syncing) {
+      return;
+    }
     _state.launchGuard = syncLaunchGuardStarting;
     await _saveState();
     try {
-      await syncNow();
+      final result = await syncNow();
+      if (!result.success && (result.error ?? '').isNotEmpty) {
+        LogManager.addLog(LogLevel.warning, 'Sync',
+            'Sync: $reason 触发的自动同步失败: ${result.error}');
+      }
+    } catch (e, s) {
+      LogManager.addLog(
+          LogLevel.error, 'Sync', 'Sync: $reason 触发的自动同步异常\n$e\n$s');
     } finally {
       _state.launchGuard = syncLaunchGuardOk;
       await _saveState();
@@ -227,12 +248,23 @@ class SyncService {
     if (!isConfigured || _previousLaunchUnclean) {
       return;
     }
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (_state.lastSyncAt > 0 &&
-        now - _state.lastSyncAt < syncResumeMinInterval.inMilliseconds) {
+    final now = DateTime.now();
+    // 冷启动时安卓会补发一次 resumed: 那时首屏刚开始, 不能当「回到前台」立刻同步,
+    // 否则 syncStartupDelay 形同虚设(实测启动 1.3 秒就进了合并阶段)。
+    if (now.isBefore(_ignoreResumeUntil)) {
+      if (!_loggedColdResumeSkip) {
+        _loggedColdResumeSkip = true;
+        LogManager.addLog(LogLevel.info, 'Sync',
+            'Sync: 忽略冷启动补发的 resumed, 首屏稳定后再由定时器开始同步');
+      }
       return;
     }
-    unawaited(syncNow());
+    final nowMs = now.millisecondsSinceEpoch;
+    if (_state.lastSyncAt > 0 &&
+        nowMs - _state.lastSyncAt < syncResumeMinInterval.inMilliseconds) {
+      return;
+    }
+    unawaited(_runGuardedSync('回到前台'));
   }
 
   /// 本地数据有变更: 防抖 5 秒后上传自己的设备快照
@@ -382,6 +414,7 @@ class SyncService {
       }
 
       phaseStart = DateTime.now();
+      _markMergeStage('合并前备份');
       backupDir = await _backupLocalData();
       _logStage('合并前备份', phaseStart);
 
@@ -397,19 +430,25 @@ class SyncService {
             'Sync: 合并前 在已打开的本地连接上 ATTACH 合并 ${snapshots.length} 个远端快照');
         for (final snapshot in snapshots) {
           final deviceStart = DateTime.now();
+          // 每一步除了写日志, 还同步写一份阶段标记: 只写日志的话,
+          // 进程在事务里被带走时那份日志本身也可能丢行, 无从定位。
+          void markMergeStage(String db, String phase, int ms) {
+            _markMergeStage('$db $phase (设备 ${snapshot.deviceId})');
+            LogManager.addLog(LogLevel.info, 'Sync',
+                'Sync: $db $phase ${snapshot.deviceId} 耗时 ${ms}ms');
+          }
+
           final historyStats = mergeHistoryDatabase(
             local: historyDb,
             remotePath: '${snapshot.dir}/$syncHistoryDbFileName',
             nowMs: DateTime.now().millisecondsSinceEpoch,
-            log: (phase, ms) => LogManager.addLog(LogLevel.info, 'Sync',
-                'Sync: history.db $phase ${snapshot.deviceId} 耗时 ${ms}ms'),
+            log: (phase, ms) => markMergeStage('history.db', phase, ms),
           );
           final favoriteStats = mergeLocalFavoritesDatabase(
             local: favoritesDb,
             remotePath: '${snapshot.dir}/$syncLocalFavoritesDbFileName',
             nowMs: DateTime.now().millisecondsSinceEpoch,
-            log: (phase, ms) => LogManager.addLog(LogLevel.info, 'Sync',
-                'Sync: local_favorite.db $phase ${snapshot.deviceId} 耗时 ${ms}ms'),
+            log: (phase, ms) => markMergeStage('local_favorite.db', phase, ms),
           );
           stats.add(historyStats);
           stats.add(favoriteStats);
@@ -430,6 +469,8 @@ class SyncService {
       } finally {
         // 合并直接改了本地库, 缓存要作废; 连接没关, 不需要重开
         _refreshLocalCaches();
+        // 合并这一段走完了(成功或 Dart 层报错都算), 标记只在「进程被打断」时才该留下
+        _clearMergeStage();
       }
 
       if (mergeError.isNotEmpty) {
@@ -861,6 +902,44 @@ class SyncService {
     } catch (e, s) {
       LogManager.addLog(LogLevel.error, 'Sync', 'Sync: 备份失败\n$e\n$s');
       return '';
+    }
+  }
+
+  /// 合并阶段标记文件: 用同步写落盘, 不经过日志。
+  /// 日志会丢行(并发写互相覆盖), 进程被原生崩溃带走后这份标记还在。
+  File get _mergeStageFile => File('${App.dataPath}/sync_merge_stage.txt');
+
+  void _markMergeStage(String stage) {
+    try {
+      _mergeStageFile.writeAsStringSync(stage);
+    } catch (_) {}
+  }
+
+  void _clearMergeStage() {
+    try {
+      final file = _mergeStageFile;
+      if (file.existsSync()) {
+        file.deleteSync();
+      }
+    } catch (_) {}
+  }
+
+  /// 启动时报告上次合并中断在哪一步: 有标记说明那次合并没走完, 进程被打断了
+  void _reportPreviousMergeStage() {
+    try {
+      final file = _mergeStageFile;
+      if (!file.existsSync()) {
+        return;
+      }
+      final stage = file.readAsStringSync().trim();
+      file.deleteSync();
+      if (stage.isEmpty) {
+        return;
+      }
+      LogManager.addLog(LogLevel.error, 'Sync',
+          'Sync: 上次同步在合并阶段被中断(进程级崩溃), 最后执行的步骤: $stage');
+    } catch (e, s) {
+      LogManager.addLog(LogLevel.error, 'Sync', 'Sync: 读合并阶段标记失败\n$e\n$s');
     }
   }
 

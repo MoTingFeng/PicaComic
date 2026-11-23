@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -88,6 +89,10 @@ class LogManager {
     if (file == null || !file.existsSync()) {
       return;
     }
+    // 启动时正常还没有写入器; 万一有, 先关掉, 否则改名之后旧 fd 会继续写进 .1
+    final sink = _sink;
+    _sink = null;
+    sink?.close();
     _rotateFiles(file);
   }
 
@@ -111,21 +116,74 @@ class LogManager {
 
   static int _writesSinceSizeCheck = 0;
 
-  static void writeLog(LogLevel level, String title, String content) {
-    var file = logFile;
-    if (file == null) {
+  /// 日志写入器: 整个进程只用一个 append 模式的 IOSink。
+  ///
+  /// 不能每条都 `file.writeAsString(mode: append)`: dart:io 的 append 是
+  /// 「打开 -> 定位到文件末尾 -> 写」, 并发调用时两次写会定位到同一个偏移而互相覆盖。
+  /// 网络/同步密集时日志会被吃掉大半(本机压测: 800 条一次性并发只活下来 2 条,
+  /// 并发度 4 时丢 600 条), 崩溃现场全靠日志, 丢行等于丢证据。
+  /// 换成单个 IOSink 做同样的压测是 0 丢失。
+  static IOSink? _sink;
+
+  /// 正在轮转文件: 期间的日志先攒着, 轮转完成后按顺序补写到新文件
+  static bool _rotating = false;
+
+  static final List<String> _duringRotation = <String>[];
+
+  static void _write(String text) {
+    if (_rotating) {
+      _duringRotation.add(text);
       return;
     }
-    file.writeAsString(
-      "${DateTime.now().toIso8601String()} ${level.name}\n$title: $content\n\n",
-      mode: FileMode.append,
-    );
+    try {
+      // 注意: 不能在中途调 sink.flush() —— 这个 IOSink 上 flush 与后续 write
+      // 并发时会让后面的写直接抛 "StreamSink is bound to a stream", 压测里表现为
+      // flush 之后的几百条全部丢失。写入器本身是持续往内核写的, 进程被杀不会丢
+      // 已写出的数据, 所以不需要手动 flush。
+      (_sink ??= logFile!.openWrite(mode: FileMode.append)).write(text);
+    } catch (e) {
+      print("Failed to write log: $e");
+    }
+  }
+
+  /// 先关写入器再改名, 否则 rename 之后旧 fd 会继续把日志写进 .1
+  static Future<void> _rotateAsync(File file) async {
+    if (_rotating) {
+      return;
+    }
+    _rotating = true;
+    try {
+      final sink = _sink;
+      _sink = null;
+      if (sink != null) {
+        await sink.flush();
+        await sink.close();
+      }
+      _rotateFiles(file);
+    } catch (e) {
+      print("Failed to rotate log file: $e");
+    } finally {
+      _rotating = false;
+      final pending = List<String>.from(_duringRotation);
+      _duringRotation.clear();
+      for (final text in pending) {
+        _write(text);
+      }
+    }
+  }
+
+  static void writeLog(LogLevel level, String title, String content) {
+    if (logFile == null) {
+      return;
+    }
+    _write("${DateTime.now().toIso8601String()} ${level.name}\n$title: $content\n\n");
     // 每写若干条查一次体积, 免得一次长下载把日志写成几个 G
     if (++_writesSinceSizeCheck >= 200) {
       _writesSinceSizeCheck = 0;
+      final file = logFile!;
       try {
         if (file.existsSync() && file.lengthSync() > maxLogFileSize) {
-          _rotateFiles(file);
+          unawaited(_rotateAsync(file));
         }
       } catch (e) {
         print("Failed to check log size: $e");

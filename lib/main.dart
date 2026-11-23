@@ -126,10 +126,11 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
       } else if (state == AppLifecycleState.resumed) {
         showContent();
         Future.delayed(const Duration(milliseconds: 200), checkClipboard);
+        // 回到前台: 距上次成功同步满 2 分钟才再同步(旧实现是 2 小时)。
+        // 只在 resumed 时调: hidden/paused/inactive 本来就不是「回来」, 以前无条件调,
+        // 连冷启动补发的那次 resumed 也当成了回前台。
+        SyncService.instance.onAppResumed();
       }
-
-      // 回到前台: 距上次成功同步满 2 分钟才再同步(旧实现是 2 小时)
-      SyncService.instance.onAppResumed();
     });
   }
 

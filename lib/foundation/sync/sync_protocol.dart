@@ -47,6 +47,13 @@ const Duration syncUploadDebounce = Duration(seconds: 5);
 /// 回到前台后距上次成功同步至少多久才再同步
 const Duration syncResumeMinInterval = Duration(minutes: 2);
 
+/// 冷启动后这段时间内的 resumed 事件不算「回到前台」。
+///
+/// 安卓冷启动会补发一次 resumed; 那时首屏刚起来, 如果按「回到前台」处理就会
+/// 绕过 [syncStartupDelay] 立刻开始同步 —— 4.10.2 的启动崩溃就是这样在
+/// 启动 1.3 秒就进到合并阶段的。这段时间内忽略 resumed, 交给首屏稳定后的定时器。
+const Duration syncColdStartResumeIgnore = Duration(seconds: 12);
+
 /// 冷启动自动同步: 首屏渲染完成后延迟多久再跑。
 /// 避免和首屏查询 + 详情页加载抢同一个 sqlite 连接。
 const Duration syncStartupDelay = Duration(seconds: 5);

@@ -187,11 +187,17 @@ SyncStats mergeHistoryDatabase({
   log?.call('ATTACH 远端 history.db', elapsedMs());
   final remote = _AttachedRemote(local);
   try {
+    // 每一步单独打点: 只打「ATTACH」的话, 进程在事务里被带走时
+    // 日志里看不出到底死在哪张表上(4.10.2 那次就是这样断在 ATTACH 之后)。
     local.execute('begin immediate;');
+    log?.call('事务已开始', elapsedMs());
     try {
       _ensureHistorySchema(local);
+      log?.call('补表结构', elapsedMs());
       _mergeHistoryTable(local, remote, stats);
+      log?.call('合并 history 表', elapsedMs());
       _mergeImageFavorites(local, remote, stats, nowMs);
+      log?.call('合并图片收藏', elapsedMs());
       local.execute('commit;');
       log?.call('合并事务已提交', elapsedMs());
     } catch (_) {
@@ -500,7 +506,9 @@ SyncStats mergeLocalFavoritesDatabase({
           primary key (target, type, folder)
         );
       """);
+      log?.call('事务已开始', elapsedMs());
       final tombstones = _mergeFavoriteTombstones(local, remote);
+      log?.call('合并删除墓碑', elapsedMs());
       _mergeFolderOrder(local, remote);
       final folders = <String>{
         ..._favoriteFolders(local),
@@ -512,6 +520,7 @@ SyncStats mergeLocalFavoritesDatabase({
         }
         _mergeFavoriteFolder(local, remote, folder, tombstones, stats);
       }
+      log?.call('合并 ${folders.length} 个收藏夹', elapsedMs());
       _mergeFolderSync(local, remote);
       _purgeFavoriteTombstones(local, nowMs);
       local.execute('commit;');
